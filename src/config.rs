@@ -13,7 +13,6 @@ pub struct LlmConfig {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub gemini_api_key: String,
-    pub enable_search: Option<bool>,
 }
 
 impl Config {

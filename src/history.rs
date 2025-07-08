@@ -79,10 +79,6 @@ impl ChatHistory {
         self.current_session_id.and_then(|id| self.sessions.get(&id))
     }
 
-    pub fn get_current_session_mut(&mut self) -> Option<&mut ChatSession> {
-        self.current_session_id.and_then(|id| self.sessions.get_mut(&id))
-    }
-
     pub fn switch_session(&mut self, session_id: Uuid) -> Result<()> {
         if self.sessions.contains_key(&session_id) {
             self.current_session_id = Some(session_id);
@@ -107,46 +103,6 @@ impl ChatHistory {
         } else {
             Err(anyhow::anyhow!("Session not found"))
         }
-    }
-
-    pub fn search_messages(&self, query: &str) -> Vec<(&ChatSession, &ChatMessage)> {
-        let mut results = Vec::new();
-        let query_lower = query.to_lowercase();
-
-        for session in self.sessions.values() {
-            for message in &session.messages {
-                if message.content.to_lowercase().contains(&query_lower) {
-                    results.push((session, message));
-                }
-            }
-        }
-
-        results.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
-        results
-    }
-
-    pub fn get_conversation_context(&self, max_messages: usize) -> Vec<String> {
-        if let Some(session) = self.get_current_session() {
-            let mut context = Vec::new();
-            let start_index = session.messages.len().saturating_sub(max_messages);
-            
-            for message in &session.messages[start_index..] {
-                let role = if message.is_user { "User" } else { "Assistant" };
-                context.push(format!("{}: {}", role, message.content));
-            }
-            
-            context
-        } else {
-            Vec::new()
-        }
-    }
-
-    pub fn get_session_count(&self) -> usize {
-        self.sessions.len()
-    }
-
-    pub fn get_current_session_title(&self) -> Option<String> {
-        self.get_current_session().map(|s| s.title.clone())
     }
 }
 
@@ -214,13 +170,5 @@ impl HistoryManager {
         } else {
             Vec::new()
         }
-    }
-
-    pub fn get_session_count(&self) -> usize {
-        self.history.sessions.len()
-    }
-
-    pub fn get_current_session_title(&self) -> Option<String> {
-        self.history.get_current_session().map(|s| s.title.clone())
     }
 }
