@@ -43,6 +43,10 @@ pub struct ChatApp {
     pub selected_files: Vec<String>,
     pub input_line_count: usize,  // 入力フィールドの行数
     pub device_state: DeviceState,  // リアルタイムキー状態監視
+    pub input_history: Vec<String>,  // プロンプト履歴
+    pub history_index: Option<usize>,  // 現在の履歴インデックス
+    pub temp_input: String,  // 履歴ナビゲーション中の一時的な入力
+    pub show_help: bool,  // ヘルプウィンドウ表示フラグ
 }
 
 #[derive(Debug, PartialEq)]
@@ -114,12 +118,16 @@ impl ChatApp {
             selected_files: Vec::new(),
             input_line_count: 1,  // 初期値は1行
             device_state: DeviceState::new(),  // リアルタイムキー状態監視を初期化
+            input_history: Vec::new(),  // プロンプト履歴を初期化
+            history_index: None,  // 履歴インデックスを初期化
+            temp_input: String::new(),  // 一時的な入力を初期化
+            show_help: false,  // ヘルプウィンドウは初期状態では非表示
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
         if app.messages.is_empty() {
             app.messages.push(ChatMessage {
-                content: "Welcome to ConTUI! Press 'i' to start typing, 'q' to quit, 'n' for new session.\n\n📁 File operations:\n- Use @file:path to reference files\n- Ask me to create files (e.g., \"Create an empty file called test.txt\")\n- Press 'f' to browse files\n\n⚡ Command execution:\n- Ask me to run commands (e.g., \"Run 'ls -la' to list files\")\n- I can execute safe shell commands for you\n\n💡 Try asking: \"Create an empty text file called example.txt\" or \"Run 'ls -la' command\"".to_string(),
+                content: "Welcome to ConTUI! Press 'i' to start typing, 'q' to quit, 'n' for new session.\n\n📁 File operations:\n- Use @file:path to reference files\n- Ask me to create files (e.g., \"Create an empty file called test.txt\")\n- Press 'f' to browse files\n\n� Command execution:\n- Ask me to run commands (e.g., \"List files in current directory\")\n- I can execute shell commands for you\n\n�💡 Try asking:\n- \"Create an empty text file called example.txt\"\n- \"List files in current directory\"\n- \"Show git status\"".to_string(),
                 is_user: false,
             });
         }
@@ -145,6 +153,12 @@ impl ChatApp {
     }
 
     fn handle_normal_mode_key(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        // Ctrl+H でヘルプ表示を切り替え
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
+            self.show_help = !self.show_help;
+            return Ok(false);
+        }
+        
         match key_event.code {
             // 終了
             KeyCode::Char('q') => {
@@ -214,15 +228,21 @@ impl ChatApp {
             KeyCode::Char('j') | KeyCode::Down => {
                 if self.input.trim().is_empty() {
                     self.scroll_messages_down();
-                } else {
+                } else if self.input.lines().count() > 1 {
                     self.move_cursor_down();
+                } else {
+                    // 単一行の場合は履歴をナビゲート
+                    self.navigate_history_down();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.input.trim().is_empty() {
                     self.scroll_messages_up();
-                } else {
+                } else if self.input.lines().count() > 1 {
                     self.move_cursor_up();
+                } else {
+                    // 単一行の場合は履歴をナビゲート
+                    self.navigate_history_up();
                 }
             }
             KeyCode::Char('0') => {
@@ -257,6 +277,9 @@ impl ChatApp {
             KeyCode::Enter => {
                 if !self.input.trim().is_empty() {
                     self.send_message();
+                } else {
+                    // 入力が空の場合、選択されたメッセージを入力欄に挿入
+                    self.insert_selected_message();
                 }
             }
             
@@ -267,12 +290,23 @@ impl ChatApp {
                 self.file_browser_state.select(Some(0));
             }
             
+            // 選択されたメッセージを入力欄に挿入
+            KeyCode::Char('y') => {
+                self.insert_selected_message();
+            }
+            
             _ => {}
         }
         Ok(false)
     }
 
     fn handle_insert_mode_key(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        // Ctrl+H でヘルプ表示を切り替え
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
+            self.show_help = !self.show_help;
+            return Ok(false);
+        }
+        
         match key_event.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
@@ -311,12 +345,18 @@ impl ChatApp {
                 }
             }
             KeyCode::Char(c) => {
+                // 履歴ナビゲーションをリセット
+                self.reset_history_navigation();
                 self.insert_char(c);
             }
             KeyCode::Backspace => {
+                // 履歴ナビゲーションをリセット
+                self.reset_history_navigation();
                 self.delete_char_before_cursor();
             }
             KeyCode::Delete => {
+                // 履歴ナビゲーションをリセット
+                self.reset_history_navigation();
                 self.delete_char_at_cursor();
             }
             KeyCode::Left => {
@@ -329,14 +369,16 @@ impl ChatApp {
                 if self.input.lines().count() > 1 {
                     self.move_cursor_up();
                 } else {
-                    self.scroll_messages_up();
+                    // 単一行の場合は履歴をナビゲート
+                    self.navigate_history_up();
                 }
             }
             KeyCode::Down => {
                 if self.input.lines().count() > 1 {
                     self.move_cursor_down();
                 } else {
-                    self.scroll_messages_down();
+                    // 単一行の場合は履歴をナビゲート
+                    self.navigate_history_down();
                 }
             }
             _ => {}
@@ -345,6 +387,12 @@ impl ChatApp {
     }
 
     fn handle_visual_mode_key(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        // Ctrl+H でヘルプ表示を切り替え
+        if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
+            self.show_help = !self.show_help;
+            return Ok(false);
+        }
+        
         match key_event.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
@@ -712,10 +760,7 @@ impl ChatApp {
         match event {
             ChatEvent::AIResponse(msg) => {
                 // ファイル作成要求を処理
-                let mut processed_msg = self.process_file_creation_requests(&msg);
-                
-                // コマンド実行要求を処理
-                processed_msg = self.process_command_execution_requests(&processed_msg);
+                let processed_msg = self.process_file_creation_requests(&msg);
                 
                 // 履歴管理にAIレスポンスを追加（処理後のメッセージ）
                 if let Err(_) = self.history_manager.get_history_mut().add_message(processed_msg.clone(), false) {
@@ -747,11 +792,21 @@ impl ChatApp {
 
     fn send_message(&mut self) {
         let original_message = self.input.clone();
+        
+        // プロンプト履歴に追加（空でない場合）
+        if !original_message.trim().is_empty() {
+            self.add_to_input_history(original_message.clone());
+        }
+        
         self.input.clear();
         self.cursor_position = 0;
         self.input_mode = InputMode::Normal;
         self.is_loading = true;
         self.input_line_count = 1;  // 送信後は1行にリセット
+        
+        // 履歴ナビゲーションをリセット
+        self.history_index = None;
+        self.temp_input.clear();
 
         // ファイル参照を解析
         let (clean_message, file_paths) = self.parse_file_references(&original_message);
@@ -836,6 +891,33 @@ impl ChatApp {
         if !self.messages.is_empty() {
             self.scroll_offset = self.messages.len() - 1;
             self.list_state.select(Some(self.scroll_offset));
+        }
+    }
+
+    // 選択されたメッセージを入力欄に挿入
+    fn insert_selected_message(&mut self) {
+        if let Some(selected_index) = self.list_state.selected() {
+            if let Some(message) = self.messages.get(selected_index) {
+                // プレフィックス（"You: " または "AI: "）を除去して、メッセージ内容のみを取得
+                let content = message.content.clone();
+                
+                // 入力欄が空でない場合は、スペースまたは改行を追加
+                if !self.input.is_empty() {
+                    self.input.push('\n');
+                }
+                
+                // メッセージ内容を入力欄に追加
+                self.input.push_str(&content);
+                
+                // カーソル位置を最後に移動
+                self.cursor_position = self.input.graphemes(true).count();
+                
+                // 入力行数を更新
+                self.update_input_line_count();
+                
+                // インサートモードに切り替え
+                self.input_mode = InputMode::Insert;
+            }
         }
     }
 
@@ -1132,187 +1214,708 @@ impl ChatApp {
         processed_response
     }
 
-    // AIレスポンスからコマンド実行要求を解析・実行
-    fn process_command_execution_requests(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        
-        // ```run_command: の形式でコマンド実行要求を検索
-        let command_pattern = r"(?s)```run_command:([^\n\r]+)(?:\r?\n(.*?))?```";
-        
-        // Regexを使えない場合は手動で解析
-        let re = match regex::Regex::new(command_pattern) {
-            Ok(regex) => regex,
-            Err(_) => {
-                return self.manual_parse_command_execution(response);
-            }
-        };
-        
-        let mut commands_executed = Vec::new();
-        
-        let matches: Vec<_> = re.captures_iter(response).collect();
-        
-        // マッチが空の場合は、コマンド実行要求がないということなので、そのまま元のレスポンスを返す
-        if matches.is_empty() {
-            return response.to_string();
-        }
-        
-        // マッチした全てのコマンド実行要求を処理
-        for caps in matches.iter() {
-            if let Some(command_match) = caps.get(1) {
-                let command = command_match.as_str().trim();
-                
-                // コマンドを実行
-                match self.execute_command_safe(command) {
-                    Ok(output) => {
-                        commands_executed.push(command.to_string());
-                        
-                        // 元のコマンド実行コードブロックを実行結果に置換
-                        let success_message = format!(
-                            "✅ Command executed: `{}`\n\n**Output:**\n```\n{}\n```", 
-                            command, 
-                            output.trim()
-                        );
-                        
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &success_message
-                        );
-                    }
-                    Err(e) => {
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &format!("❌ Failed to execute command '{}': {}", command, e)
-                        );
-                        continue;
-                    }
-                }
+    pub fn render(&mut self, f: &mut Frame) {
+        if self.input_mode == InputMode::SessionList {
+            self.render_session_list(f);
+        } else if self.input_mode == InputMode::FileBrowser {
+            self.render_file_browser(f);
+        } else {
+            // 入力フィールドの高さを計算（最小3行、最大10行）
+            let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
+            
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),  // メッセージエリア（残りの領域）
+                    Constraint::Length(input_height),  // 入力エリア（動的に変更）
+                ])
+                .split(f.area());
+
+            self.render_messages(f, chunks[0]);
+            self.render_input(f, chunks[1]);
+            
+            // フローティングヘルプウィンドウを表示
+            if self.show_help {
+                self.render_floating_help(f);
             }
         }
-        
-        if !commands_executed.is_empty() {
-            // 実行されたコマンドのサマリーを追加
-            let summary = format!("\n\n⚡ Executed {} command(s): {}", 
-                commands_executed.len(), 
-                commands_executed.join(", ")
-            );
-            processed_response.push_str(&summary);
-        }
-        
-        processed_response
     }
 
-    // Regexが使えない場合の手動解析（コマンド実行版）
-    fn manual_parse_command_execution(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        let mut commands_executed = Vec::new();
-        
-        // ```run_command: で始まる行を検索
-        let lines: Vec<&str> = response.lines().collect();
-        let mut i = 0;
-        
-        while i < lines.len() {
-            if lines[i].starts_with("```run_command:") {
-                // コマンドを抽出
-                let command = lines[i].strip_prefix("```run_command:").unwrap_or("").trim();
-                if command.is_empty() {
-                    i += 1;
-                    continue;
-                }
+    fn render_messages(&mut self, f: &mut Frame, area: Rect) {
+        let messages: Vec<ListItem> = self
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(_i, msg)| {
+                let style = if msg.is_user {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Blue)
+                };
                 
-                // 終了ブロックを探す
-                i += 1;
-                while i < lines.len() && !lines[i].starts_with("```") {
-                    i += 1;
-                }
+                let prefix = if msg.is_user { "You" } else { "AI" };
+                let content = format!("{}: {}", prefix, msg.content);
                 
-                // コマンドを実行
-                match self.execute_command_safe(command) {
-                    Ok(output) => {
-                        commands_executed.push(command.to_string());
-                        
-                        // 成功メッセージで置換
-                        let original_block = format!("```run_command:{}\n```", command);
-                        let success_message = format!(
-                            "✅ Command executed: `{}`\n\n**Output:**\n```\n{}\n```", 
-                            command, 
-                            output.trim()
-                        );
-                        processed_response = processed_response.replace(&original_block, &success_message);
-                    }
-                    Err(e) => {
-                        // エラーメッセージで置換
-                        let original_block = format!("```run_command:{}\n```", command);
-                        let error_msg = format!("❌ Failed to execute command '{}': {}", command, e);
-                        processed_response = processed_response.replace(&original_block, &error_msg);
-                    }
-                }
+                // 幅から境界線とパディングを差し引いて計算（より保守的に）
+                let max_width = if area.width > 8 { 
+                    area.width as usize - 8 
+                } else { 
+                    1 
+                };
+                
+                // wrap_text関数を使用してテキストを改行
+                let wrapped_content = wrap_text(&content, max_width);
+                
+                ListItem::new(Text::from(wrapped_content)).style(style)
+            })
+            .collect();
+
+        let messages_list = List::new(messages)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Chat History")
+                    .border_type(BorderType::Rounded),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
+            .highlight_symbol(">> ");
+
+        f.render_stateful_widget(messages_list, area, &mut self.list_state);
+
+        // スクロール位置を適切に調整
+        if !self.messages.is_empty() {
+            // 最下部にスクロールしていた場合、新しいメッセージが追加されても最下部に留まる
+            if self.scroll_offset >= self.messages.len().saturating_sub(1) {
+                self.scroll_offset = self.messages.len().saturating_sub(1);
             }
-            i += 1;
+            
+            // 現在のスクロール位置でlist_stateを更新
+            self.list_state.select(Some(self.scroll_offset));
         }
-        
-        if !commands_executed.is_empty() {
-            let summary = format!("\n\n⚡ Executed {} command(s): {}", 
-                commands_executed.len(), 
-                commands_executed.join(", ")
-            );
-            processed_response.push_str(&summary);
+
+        if self.is_loading {
+            let loading_area = Rect {
+                x: area.x + 2,
+                y: area.y + area.height - 2,
+                width: area.width - 4,
+                height: 1,
+            };
+            
+            let loading_text = Paragraph::new("🤖 AI is thinking...")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC));
+            
+            f.render_widget(loading_text, loading_area);
         }
-        
-        processed_response
     }
 
-    // 安全にコマンドを実行するメソッド
-    fn execute_command_safe(&self, command: &str) -> Result<String> {
-        use std::process::Command;
-        use std::time::Duration;
+    fn render_input(&self, f: &mut Frame, area: Rect) {
+        let input_style = match self.input_mode {
+            InputMode::Normal => Style::default(),
+            InputMode::Insert => Style::default().fg(Color::Yellow),
+            InputMode::Visual => Style::default().fg(Color::Magenta),
+            InputMode::SessionList => Style::default().fg(Color::Cyan),
+            InputMode::FileBrowser => Style::default().fg(Color::Cyan),
+        };
+
+        let title = match self.input_mode {
+            InputMode::Normal => "Input (Press 'i' to insert, 'v' for visual, 'q' to quit)",
+            InputMode::Insert => "Insert Mode (Shift+Enter: new line, Enter: send, Esc: normal mode)",
+            InputMode::Visual => "Visual Mode (Select text, press 'd' to delete, 'y' to yank, Esc to exit)",
+            InputMode::SessionList => "Session List (Press Enter to select, 'd' to delete, 'n' for new)",
+            InputMode::FileBrowser => "File Browser (Press Enter to open, 'd' to delete, 'n' for new)",
+        };
+
+        let input = Paragraph::new(self.input.as_str())
+            .style(input_style)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_type(BorderType::Rounded),
+            );
+
+        f.render_widget(input, area);
+
+        // カーソル位置を計算（複数行対応）
+        let (cursor_line, cursor_column) = self.calculate_cursor_position();
+        let cursor_pos_x = area.x + cursor_column as u16 + 1;
+        let cursor_pos_y = area.y + cursor_line as u16 + 1;
+
+        match self.input_mode {
+            InputMode::Insert => {
+                // Insertモードでは棒線カーソル（デフォルト）
+                f.set_cursor_position((cursor_pos_x, cursor_pos_y));
+            }
+            InputMode::Normal => {
+                // Normalモードでは四角いカーソル（文字をハイライト）
+                f.set_cursor_position((cursor_pos_x, cursor_pos_y));
+                
+                // 現在のカーソル位置の文字をハイライト表示
+                let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+                if self.cursor_position < graphemes.len() {
+                    let char_at_cursor = graphemes[self.cursor_position];
+                    let highlight_area = Rect {
+                        x: cursor_pos_x,
+                        y: cursor_pos_y,
+                        width: UnicodeWidthStr::width(char_at_cursor).max(1) as u16,
+                        height: 1,
+                    };
+                    let highlight_text = Paragraph::new(char_at_cursor)
+                        .style(Style::default().bg(Color::White).fg(Color::Black));
+                    f.render_widget(highlight_text, highlight_area);
+                } else if self.input.is_empty() {
+                    // 空の場合は空白をハイライト
+                    let highlight_area = Rect {
+                        x: cursor_pos_x,
+                        y: cursor_pos_y,
+                        width: 1,
+                        height: 1,
+                    };
+                    let highlight_text = Paragraph::new(" ")
+                        .style(Style::default().bg(Color::White).fg(Color::Black));
+                    f.render_widget(highlight_text, highlight_area);
+                }
+            }
+            InputMode::Visual => {
+                // Visual Modeでは選択範囲をハイライト
+                f.set_cursor_position((cursor_pos_x, cursor_pos_y));
+                
+                if let Some((start_pos, end_pos)) = self.get_visual_selection_range() {
+                    let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+                    let mut x_offset = 0;
+                    
+                    for (i, grapheme) in graphemes.iter().enumerate() {
+                        let char_width = UnicodeWidthStr::width(*grapheme).max(1);
+                        
+                        if i >= start_pos && i < end_pos {
+                            // 選択範囲内の文字は明るい背景色でハイライト
+                            let highlight_area = Rect {
+                                x: area.x + x_offset as u16 + 1,
+                                y: cursor_pos_y,
+                                width: char_width as u16,
+                                height: 1,
+                            };
+                            let highlight_text = Paragraph::new(*grapheme)
+                                .style(Style::default().bg(Color::LightBlue).fg(Color::Black));
+                            f.render_widget(highlight_text, highlight_area);
+                        }
+                        
+                        x_offset += char_width;
+                    }
+                    
+                    // 選択範囲が空の場合でも視覚的フィードバックを提供
+                    if start_pos == end_pos {
+                        let highlight_area = Rect {
+                            x: cursor_pos_x,
+                            y: cursor_pos_y,
+                            width: 1,
+                            height: 1,
+                        };
+                        let highlight_text = Paragraph::new(" ")
+                            .style(Style::default().bg(Color::LightBlue).fg(Color::Black));
+                        f.render_widget(highlight_text, highlight_area);
+                    }
+                }
+            }
+            InputMode::SessionList => {
+                // セッション一覧モードではカーソル非表示
+            }
+            InputMode::FileBrowser => {
+                // ファイルブラウザモードではカーソル非表示
+            }
+        }
+    }
+
+    fn render_floating_help(&self, f: &mut Frame) {
+        // 画面中央にフローティングウィンドウを配置
+        let area = f.area();
+        let popup_width = 80.min(area.width - 4);
+        let popup_height = 20.min(area.height - 4);
         
-        // 危険なコマンドをブロック
-        let dangerous_commands = [
-            "rm", "rmdir", "del", "format", "fdisk", "mkfs", 
-            "dd", "shutdown", "reboot", "halt", "init",
-            "sudo rm", "sudo rmdir", "sudo dd", "sudo shutdown",
-            "chmod 000", "chown root", "passwd", "su", "sudo su"
-        ];
+        let popup_area = Rect {
+            x: (area.width - popup_width) / 2,
+            y: (area.height - popup_height) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        // 背景を完全にクリアするために空白文字で埋める
+        let clear_lines = vec![" ".repeat(popup_width as usize - 2); popup_height as usize - 2];
+        let clear_text = clear_lines.join("\n");
         
-        let command_lower = command.to_lowercase();
-        for dangerous in &dangerous_commands {
-            if command_lower.contains(dangerous) {
-                return Err(anyhow::anyhow!("Dangerous command blocked for safety: {}", command));
+        f.render_widget(
+            Paragraph::new(clear_text)
+                .style(Style::default().bg(Color::Black))
+                .block(
+                    Block::default()
+                        .style(Style::default().bg(Color::Black))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                ),
+            popup_area,
+        );
+
+        let help_text = match self.input_mode {
+            InputMode::Normal => vec![
+                "=== Normal Mode ===",
+                "",
+                "Movement:",
+                "  h/j/k/l or ←/↓/↑/→  - Move cursor",
+                "  0                   - Move to beginning of line",
+                "  $                   - Move to end of line",
+                "",
+                "Editing:",
+                "  i                   - Insert mode",
+                "  a                   - Append (insert after cursor)",
+                "  A                   - Append at end of line",
+                "  I                   - Insert at beginning of line",
+                "  o                   - Open new line below",
+                "  O                   - Open new line above",
+                "  v                   - Visual mode",
+                "",
+                "Actions:",
+                "  Enter               - Send message",
+                "  y                   - Yank (copy) current message",
+                "",
+                "Session:",
+                "  n                   - New session",
+                "  s                   - Save history",
+                "  S                   - Session list",
+                "  f                   - File browser",
+                "  q                   - Quit",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+            InputMode::Insert => vec![
+                "=== Insert Mode ===",
+                "",
+                "Text Input:",
+                "  Type normally to enter text",
+                "  Shift+Enter         - New line (multi-line input)",
+                "  Enter               - Send message",
+                "  Esc                 - Return to Normal mode",
+                "",
+                "File References:",
+                "  @file:path          - Reference a file in your message",
+                "  Example: @file:./config.json",
+                "",
+                "AI Features:",
+                "  Ask AI to create files:",
+                "    'Create a file called test.txt with hello world'",
+                "  Ask AI to run commands:",
+                "    'List files in current directory'",
+                "    'Show git status'",
+                "",
+                "History:",
+                "  ↑/↓                 - Navigate input history",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+            InputMode::Visual => vec![
+                "=== Visual Mode ===",
+                "",
+                "Selection:",
+                "  h/j/k/l or ←/↓/↑/→  - Extend selection",
+                "  w                   - Move forward by word",
+                "  b                   - Move backward by word",
+                "",
+                "Actions:",
+                "  d                   - Delete selected text",
+                "  y                   - Yank (copy) selected text",
+                "",
+                "Exit:",
+                "  v                   - Exit Visual mode",
+                "  Esc                 - Exit Visual mode",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+            InputMode::SessionList => vec![
+                "=== Session List ===",
+                "",
+                "Navigation:",
+                "  j/k or ↓/↑          - Navigate sessions",
+                "",
+                "Actions:",
+                "  Enter               - Select session",
+                "  d                   - Delete session",
+                "  n                   - Create new session",
+                "",
+                "Exit:",
+                "  q or Esc            - Return to chat",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+            InputMode::FileBrowser => vec![
+                "=== File Browser ===",
+                "",
+                "Navigation:",
+                "  j/k or ↓/↑          - Navigate files",
+                "  u                   - Go to parent directory",
+                "  r                   - Refresh directory",
+                "",
+                "Actions:",
+                "  Enter               - Add file path to input",
+                "  Space               - Toggle file selection",
+                "  i                   - Edit selected file",
+                "",
+                "Exit:",
+                "  q                   - Return to chat",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+        };
+
+        // ヘルプテキストを上から重ねてレンダリング
+        let content = Text::from(help_text.join("\n"));
+        let help_paragraph = Paragraph::new(content)
+            .style(Style::default().fg(Color::White).bg(Color::Black))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Help (Press Ctrl+H to close) ")
+                    .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .style(Style::default().bg(Color::Black)),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: true });
+
+        f.render_widget(help_paragraph, popup_area);
+    }
+
+    fn render_session_list(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+            ])
+            .split(f.area());
+
+        // セッション一覧を表示
+        let sessions = self.history_manager.get_history().get_session_list();
+        let session_items: Vec<ListItem> = sessions
+            .iter()
+            .map(|session| {
+                let message_count = session.messages.len();
+                let last_message = session.messages.last()
+                    .map(|msg| {
+                        let preview = Self::truncate_string_safe(&msg.content, 47);
+                        format!(" - {}", preview)
+                    })
+                    .unwrap_or_else(|| " - No messages".to_string());
+                
+                let title = format!("{} ({} messages){}", 
+                    session.title, 
+                    message_count, 
+                    last_message
+                );
+                
+                ListItem::new(title)
+            })
+            .collect();
+
+        let session_list = List::new(session_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Chat Sessions")
+                    .border_type(BorderType::Rounded)
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol(">> ");
+
+        f.render_stateful_widget(session_list, chunks[0], &mut self.session_list_state);
+
+        // ヘルプテキストを表示
+        let help = Paragraph::new("Use j/k to navigate, Enter to select, d to delete, n for new session, q/Esc to go back")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Help")
+                    .border_type(BorderType::Rounded)
+            )
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(help, chunks[1]);
+    }
+
+    fn render_file_browser(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(8),
+                Constraint::Length(3),
+                Constraint::Length(4),
+            ])
+            .split(f.area());
+
+        // タイトル
+        let title = Paragraph::new(format!("File Browser: {}", self.current_directory))
+            .style(Style::default().fg(Color::Yellow));
+        f.render_widget(title, chunks[0]);
+
+        // ディレクトリコンテンツ
+        let items: Vec<ListItem> = self.directory_contents
+            .iter()
+            .enumerate()
+            .map(|(_i, item)| {
+                let style = if item.ends_with('/') {
+                    Style::default().fg(Color::Blue)
+                } else {
+                    let mut path = std::path::PathBuf::from(&self.current_directory);
+                    path.push(item);
+                    let file_path = path.to_string_lossy().to_string();
+                    
+                    if self.selected_files.contains(&file_path) || 
+                       self.input.contains(&format!("@file:{}", file_path)) {
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    }
+                };
+                
+                let prefix = if item.ends_with('/') { "📁" } else { "📄" };
+                ListItem::new(format!("{} {}", prefix, item)).style(style)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Files and Directories")
+                    .border_type(BorderType::Rounded),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("➤ ");
+
+        f.render_stateful_widget(list, chunks[1], &mut self.file_browser_state);
+
+        // 現在の入力フィールドを表示
+        let input_text = if self.input.is_empty() {
+            "Type your message here... (Use @file:path to reference files)".to_string()
+        } else {
+            self.input.clone()
+        };
+
+        let input_paragraph = Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Message Input")
+                    .border_type(BorderType::Rounded),
+            )
+            .style(Style::default().fg(Color::White));
+        f.render_widget(input_paragraph, chunks[2]);
+
+        // ヘルプ
+        let help_text = "↑/↓: Navigate | Enter: Add to input | Space: Toggle | u: Parent | r: Refresh | q: Back";
+        let help = Paragraph::new(help_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Help")
+                    .border_type(BorderType::Rounded),
+            )
+            .style(Style::default().fg(Color::Gray));
+        f.render_widget(help, chunks[3]);
+    }
+
+    fn truncate_string_safe(s: &str, max_chars: usize) -> String {
+        if s.chars().count() <= max_chars {
+            s.to_string()
+        } else {
+            s.chars().take(max_chars).collect::<String>() + "..."
+        }
+    }
+
+    // Visual Modeで使用するヘルパーメソッド
+    fn move_to_next_word(&mut self) {
+        let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+        let mut pos = self.cursor_position;
+        
+        // 現在の位置が空白でない場合、空白まで移動
+        while pos < graphemes.len() && !graphemes[pos].chars().all(char::is_whitespace) {
+            pos += 1;
+        }
+        
+        // 空白をスキップ
+        while pos < graphemes.len() && graphemes[pos].chars().all(char::is_whitespace) {
+            pos += 1;
+        }
+        
+        self.cursor_position = pos.min(graphemes.len());
+    }
+    
+    fn move_to_prev_word(&mut self) {
+        if self.cursor_position == 0 {
+            return;
+        }
+        
+        let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+        let mut pos = self.cursor_position - 1;
+        
+        // 空白をスキップ
+        while pos > 0 && graphemes[pos].chars().all(char::is_whitespace) {
+            pos -= 1;
+        }
+        
+        // 単語の先頭まで移動
+        while pos > 0 && !graphemes[pos - 1].chars().all(char::is_whitespace) {
+            pos -= 1;
+        }
+        
+        self.cursor_position = pos;
+    }
+    
+    fn delete_visual_selection(&mut self) {
+        if let Some(start) = self.visual_start {
+            let (start_pos, end_pos) = if start <= self.cursor_position {
+                (start, self.cursor_position + 1)
+            } else {
+                (self.cursor_position, start + 1)
+            };
+            
+            let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+            let mut new_input = String::new();
+            
+            for (i, grapheme) in graphemes.iter().enumerate() {
+                if i < start_pos || i >= end_pos {
+                    new_input.push_str(grapheme);
+                }
+            }
+            
+            self.input = new_input;
+            self.cursor_position = start_pos.min(self.input.graphemes(true).count());
+        }
+    }
+    
+    fn get_visual_selection_range(&self) -> Option<(usize, usize)> {
+        if let Some(start) = self.visual_start {
+            let (start_pos, end_pos) = if start <= self.cursor_position {
+                (start, self.cursor_position + 1)
+            } else {
+                (self.cursor_position, start + 1)
+            };
+            Some((start_pos, end_pos))
+        } else {
+            None
+        }
+    }
+
+    // 入力フィールドの行数を更新
+    fn update_input_line_count(&mut self) {
+        self.input_line_count = if self.input.is_empty() {
+            1
+        } else {
+            self.input.lines().count().max(1)
+        };
+    }
+
+    // 複数行のカーソル位置を計算 (行, 列) を返す
+    fn calculate_cursor_position(&self) -> (usize, usize) {
+        if self.input.is_empty() {
+            return (0, 0);
+        }
+
+        let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+        let mut line = 0;
+        let mut column = 0;
+        
+        for (i, grapheme) in graphemes.iter().enumerate() {
+            if i >= self.cursor_position {
+                break;
+            }
+            
+            if *grapheme == "\n" {
+                line += 1;
+                column = 0;
+            } else {
+                column += UnicodeWidthStr::width(*grapheme);
             }
         }
         
-        // macOSでのシェル実行
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.current_directory)
-            .output()
-            .map_err(|e| anyhow::anyhow!("Failed to execute command: {}", e))?;
-        
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        
-        if !output.status.success() {
-            return Err(anyhow::anyhow!("Command failed with exit code {}: {}", 
-                output.status.code().unwrap_or(-1), 
-                stderr
-            ));
+        (line, column)
+    }
+
+    // プロンプト履歴に追加
+    fn add_to_input_history(&mut self, input: String) {
+        // 空の入力や同じ内容の連続は追加しない
+        if input.trim().is_empty() || self.input_history.last() == Some(&input) {
+            return;
         }
         
-        // 出力が長すぎる場合は短縮
-        let combined_output = if stderr.is_empty() {
-            stdout.to_string()
-        } else {
-            format!("{}\n--- stderr ---\n{}", stdout, stderr)
-        };
+        self.input_history.push(input);
         
-        if combined_output.len() > 2000 {
-            Ok(format!("{}...\n\n[Output truncated - {} characters total]", 
-                &combined_output[..2000], 
-                combined_output.len()
-            ))
-        } else {
-            Ok(combined_output)
+        // 履歴のサイズ制限（最大100個）
+        if self.input_history.len() > 100 {
+            self.input_history.remove(0);
         }
+    }
+
+    // 履歴を前に戻る（上矢印）
+    fn navigate_history_up(&mut self) {
+        if self.input_history.is_empty() {
+            return;
+        }
+
+        match self.history_index {
+            None => {
+                // 初回の履歴ナビゲーション：現在の入力を保存し、最新の履歴を表示
+                self.temp_input = self.input.clone();
+                self.history_index = Some(self.input_history.len() - 1);
+                self.input = self.input_history[self.input_history.len() - 1].clone();
+            }
+            Some(index) => {
+                // さらに古い履歴に移動
+                if index > 0 {
+                    self.history_index = Some(index - 1);
+                    self.input = self.input_history[index - 1].clone();
+                }
+            }
+        }
+        
+        // カーソルを末尾に移動
+        self.cursor_position = self.input.graphemes(true).count();
+        self.update_input_line_count();
+    }
+
+    // 履歴を後に進む（下矢印）
+    fn navigate_history_down(&mut self) {
+        if let Some(index) = self.history_index {
+            if index < self.input_history.len() - 1 {
+                // より新しい履歴に移動
+                self.history_index = Some(index + 1);
+                self.input = self.input_history[index + 1].clone();
+            } else {
+                // 最新の履歴まで来たので、元の入力に戻る
+                self.history_index = None;
+                self.input = self.temp_input.clone();
+                self.temp_input.clear();
+            }
+            
+            // カーソルを末尾に移動
+            self.cursor_position = self.input.graphemes(true).count();
+            self.update_input_line_count();
+        }
+    }
+
+    // 履歴ナビゲーションをリセット
+    fn reset_history_navigation(&mut self) {
+        self.history_index = None;
+        self.temp_input.clear();
     }
 }

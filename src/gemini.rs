@@ -3,6 +3,16 @@ use anyhow::Result;
 use crate::config::LlmConfig;
 use crate::file_access::FileAccessManager;
 
+/// コマンド実行結果の構造体
+#[derive(Debug)]
+pub struct CommandResult {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub success: bool,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Serialize)]
 struct GeminiRequest {
     contents: Vec<Content>,
@@ -71,19 +81,45 @@ impl GeminiClient {
 
     // システムプロンプトを作成
     fn get_system_prompt(&self) -> String {
-        r#"あなたはファイル作成機能を持つAIアシスタントです。ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
+        r#"あなたはファイル作成機能とコマンド実行機能を持つAIアシスタントです。
+
+## ファイル作成機能
+ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
 
 ```create_file:ファイル名.拡張子
 ファイルの内容をここに記述
 ```
 
+## コマンド実行機能
+ユーザーがコマンドの実行を依頼した場合、以下の正確な形式を使用してコマンドを実行できます：
+
+### 標準コマンド実行（出力を表示）
+```execute_command
+実行したいコマンド
+```
+
+### サイレントコマンド実行（出力を非表示）
+```execute_command_silent
+実行したいコマンド
+```
+
+**出力制御の判断基準:**
+- ファイル内容の確認（cat, less, head, tail等）→ 標準実行
+- ディレクトリの確認（ls, find等）→ 標準実行  
+- システム情報の取得（ps, df, uname等）→ 標準実行
+- デバッグ目的の実行 → 標準実行
+- ファイルの移動/削除（mv, rm, cp等）→ サイレント実行
+- 設定変更（chmod, chown等）→ サイレント実行
+- パッケージ管理（apt, brew等）→ サイレント実行
+- バックグラウンド処理 → サイレント実行
+
 重要な指示：
-1. 必ず上記の形式を正確に使用してください（```create_file:ファイル名）
-2. 空のファイルの場合は、形式は使用しますが内容部分は空にしてください
-3. ユーザーがファイル作成を依頼した場合は、必ずこの形式を使用してください
+1. ファイル作成：必ず上記の形式を正確に使用してください（```create_file:ファイル名）
+2. コマンド実行：標準実行かサイレント実行かを適切に判断してください
+3. 空のファイルの場合は、形式は使用しますが内容部分は空にしてください
 4. あらゆるファイル形式を作成できます（.txt, .rs, .py, .html, .json など）
-5. 空のファイルも作成できます
-6. ユーザーが要求するあらゆる内容のファイルを作成できます
+5. シェルコマンド、システムコマンド、プログラム実行など、様々なコマンドを実行できます
+6. 安全で適切なコマンドのみを実行してください
 
 例：
 - 空のテキストファイル: ```create_file:test.txt
@@ -99,7 +135,19 @@ fn main() {
   "version": "1.0.0"
 }
 
-ユーザーがファイル作成を依頼した場合は、必ず肯定的に応答し、上記の形式を使用してください。「ファイルを作成できません」と言わないでください - あなたはこの形式を使用してファイルを作成できますし、そうするべきです。
+- ディレクトリの内容を表示: ```execute_command
+ls -la
+
+- ファイルの内容を確認: ```execute_command
+cat config.json
+
+- ファイルを移動: ```execute_command_silent
+mv old_file.txt new_file.txt
+
+- 権限を変更: ```execute_command_silent
+chmod +x script.sh
+
+ユーザーがファイル作成やコマンド実行を依頼した場合は、必ず肯定的に応答し、上記の形式を使用してください。「ファイルを作成できません」や「コマンドを実行できません」と言わないでください - あなたはこれらの形式を使用して実行できますし、そうするべきです。
 
 注意：同じファイル名が既に存在する場合、システムが自動的にユニークな名前で作成します（例：file.txt → file_1.txt）。"#.to_string()
     }
@@ -107,6 +155,82 @@ fn main() {
     // メッセージにシステムプロンプトを追加
     fn prepare_message_with_system_prompt(&self, user_message: &str) -> String {
         format!("{}\n\nUser: {}", self.get_system_prompt(), user_message)
+    }
+
+    /// レスポンステキストでファイル作成とコマンド実行を処理する共通関数
+    async fn process_response_actions(&self, response_text: &str, original_message: &str) -> Result<String> {
+        let mut has_actions = false;
+        let mut command_results = Vec::new();
+        let mut created_files = Vec::new();
+        
+        // ファイル作成が含まれているかチェックして自動実行
+        if response_text.contains("```create_file:") {
+            has_actions = true;
+            match self.process_file_creation_response(response_text) {
+                Ok(files) => {
+                    self.print_file_creation_summary(&files);
+                    created_files = files;
+                }
+                Err(e) => {
+                    eprintln!("ファイル作成エラー: {}", e);
+                }
+            }
+        }
+        
+        // コマンド実行が含まれているかチェックして自動実行
+        if response_text.contains("```execute_command") {
+            has_actions = true;
+            match self.process_command_execution_response(response_text).await {
+                Ok(results) => {
+                    command_results = results;
+                }
+                Err(e) => {
+                    eprintln!("コマンド実行エラー: {}", e);
+                }
+            }
+        }
+        
+        // アクションが実行された場合、結果を含めてAIに再度問い合わせ
+        if has_actions {
+            let mut context_message = String::new();
+            context_message.push_str("以下のアクションが実行されました。結果を確認して、適切な回答やコメントをしてください：\n\n");
+            context_message.push_str(&format!("元のリクエスト: {}\n\n", original_message));
+            
+            if !created_files.is_empty() {
+                context_message.push_str(&format!("作成されたファイル ({} 個):\n", created_files.len()));
+                for file in &created_files {
+                    context_message.push_str(&format!("- {}\n", file));
+                }
+                context_message.push('\n');
+            }
+            
+            if !command_results.is_empty() {
+                context_message.push_str("コマンド実行結果:\n");
+                for (i, result) in command_results.iter().enumerate() {
+                    context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
+                    context_message.push_str(&format!("   ステータス: {}\n", if result.success { "成功" } else { "失敗" }));
+                    
+                    if let Some(code) = result.exit_code {
+                        context_message.push_str(&format!("   終了コード: {}\n", code));
+                    }
+                    
+                    if !result.stdout.is_empty() {
+                        context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
+                    }
+                    
+                    if !result.stderr.is_empty() {
+                        context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
+                    }
+                    context_message.push('\n');
+                }
+            }
+            
+            // AIに再度問い合わせて結果に基づく回答を取得
+            let result = self.get_ai_response_for_results(&context_message).await?;
+            return Ok(self.format_bold_text(&result));
+        }
+        
+        Ok(self.format_bold_text(response_text))
     }
 
     pub async fn chat(&self, message: &str) -> Result<String> {
@@ -151,19 +275,14 @@ fn main() {
             if let Some(part) = candidate.content.parts.first() {
                 let response_text = part.text.clone();
                 
-                // ファイル作成が含まれているかチェックして自動実行
-                if response_text.contains("```create_file:") {
-                    match self.process_file_creation_response(&response_text) {
-                        Ok(created_files) => {
-                            self.print_file_creation_summary(&created_files);
-                        }
-                        Err(e) => {
-                            eprintln!("❌ ファイル作成に失敗: {}", e);
-                        }
+                // レスポンスアクションを処理し、結果を取得
+                match self.process_response_actions(&response_text, message).await {
+                    Ok(final_response) => return Ok(final_response),
+                    Err(e) => {
+                        eprintln!("アクション処理エラー: {}", e);
+                        return Ok(self.format_bold_text(&response_text)); // エラーの場合は元のレスポンスを返す
                     }
                 }
-                
-                return Ok(response_text);
             }
         }
 
@@ -228,19 +347,14 @@ fn main() {
             if let Some(part) = candidate.content.parts.first() {
                 let response_text = part.text.clone();
                 
-                // ファイル作成が含まれているかチェックして自動実行
-                if response_text.contains("```create_file:") {
-                    match self.process_file_creation_response(&response_text) {
-                        Ok(created_files) => {
-                            self.print_file_creation_summary(&created_files);
-                        }
-                        Err(e) => {
-                            eprintln!("❌ ファイル作成に失敗: {}", e);
-                        }
+                // レスポンスアクションを処理し、結果を取得
+                match self.process_response_actions(&response_text, message).await {
+                    Ok(final_response) => return Ok(final_response),
+                    Err(e) => {
+                        eprintln!("アクション処理エラー: {}", e);
+                        return Ok(self.format_bold_text(&response_text)); // エラーの場合は元のレスポンスを返す
                     }
                 }
-                
-                return Ok(response_text);
             }
         }
 
@@ -328,19 +442,14 @@ fn main() {
             if let Some(part) = candidate.content.parts.first() {
                 let response_text = part.text.clone();
                 
-                // ファイル作成が含まれているかチェックして自動実行
-                if response_text.contains("```create_file:") {
-                    match self.process_file_creation_response(&response_text) {
-                        Ok(created_files) => {
-                            self.print_file_creation_summary(&created_files);
-                        }
-                        Err(e) => {
-                            eprintln!("❌ ファイル作成に失敗: {}", e);
-                        }
+                // レスポンスアクションを処理し、結果を取得
+                match self.process_response_actions(&response_text, message).await {
+                    Ok(final_response) => return Ok(final_response),
+                    Err(e) => {
+                        eprintln!("アクション処理エラー: {}", e);
+                        return Ok(self.format_bold_text(&response_text)); // エラーの場合は元のレスポンスを返す
                     }
                 }
-                
-                return Ok(response_text);
             }
         }
 
@@ -429,8 +538,7 @@ fn main() {
                         created_files.push(created_path);
                     }
                     Err(e) => {
-                        eprintln!("❌ ファイル作成失敗 '{}': {}", filename, e);
-                        return Err(anyhow::anyhow!("ファイル作成失敗 '{}': {}", filename, e));
+                        return Err(anyhow::anyhow!("❌ ファイル作成失敗 '{}': {}", filename, e));
                     }
                 }
             }
@@ -442,5 +550,171 @@ fn main() {
         }
 
         Ok(created_files)
+    }
+
+    /// シェルコマンドを実行
+    pub async fn execute_command(&self, command: &str) -> Result<CommandResult> {
+        use tokio::process::Command;
+        
+        // macOS/Linux用のシェルコマンド実行
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .output()
+            .await?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let success = output.status.success();
+        let exit_code = output.status.code();
+
+        Ok(CommandResult {
+            command: command.to_string(),
+            stdout,
+            stderr,
+            success,
+            exit_code,
+        })
+    }
+
+    /// LLMのレスポンスから execute_command 形式のブロックを解析してコマンドを実行
+    pub async fn process_command_execution_response(&self, response: &str) -> Result<Vec<CommandResult>> {
+        let mut command_results = Vec::new();
+        let lines: Vec<&str> = response.lines().collect();
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i];
+            
+            // execute_command または execute_command_silent 形式の開始を検出
+            if line.starts_with("```execute_command") {
+                // コマンドの内容を収集
+                let mut command = String::new();
+                i += 1; // 次の行に移動
+
+                // ``` で終わるまで、または最後の行まで内容を収集
+                while i < lines.len() && !lines[i].starts_with("```") {
+                    if !command.is_empty() {
+                        command.push('\n');
+                    }
+                    command.push_str(lines[i]);
+                    i += 1;
+                }
+
+                // コマンドが空でない場合実行
+                if !command.trim().is_empty() {
+                    match self.execute_command(command.trim()).await {
+                        Ok(result) => {
+                            command_results.push(result);
+                        }
+                        Err(e) => {
+                            // エラーの場合でも結果として記録
+                            command_results.push(CommandResult {
+                                command: command.trim().to_string(),
+                                stdout: String::new(),
+                                stderr: format!("❌ 実行エラー: {}", e),
+                                success: false,
+                                exit_code: None,
+                            });
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if command_results.is_empty() {
+            return Err(anyhow::anyhow!("レスポンスにexecute_commandブロックが見つかりませんでした"));
+        }
+
+        Ok(command_results)
+    }
+
+    /// 出力テキストをシンプルに表示するヘルパーメソッド
+    fn print_output_simple(&self, output: &str, label: &str) {
+        let lines: Vec<&str> = output.lines().collect();
+        
+        if lines.is_empty() {
+            return;
+        }
+
+        // 出力行数の制限
+        let max_lines = 5;
+        let display_lines = if lines.len() > max_lines {
+            &lines[..max_lines]
+        } else {
+            &lines
+        };
+
+        println!("  {}:", label);
+        
+        for line in display_lines {
+            // 空行の場合はスキップ
+            if line.trim().is_empty() {
+                continue;
+            }
+            
+            let trimmed_line = if line.len() > 65 {
+                format!("{}...", &line[..62])
+            } else {
+                line.to_string()
+            };
+            println!("    {}", trimmed_line);
+        }
+
+        // 行数が多い場合は省略表示
+        if lines.len() > max_lines {
+            println!("    ... (残り {} 行)", lines.len() - max_lines);
+        }
+    }
+
+    /// AIに実行結果を送信して、結果に基づく回答を取得
+    async fn get_ai_response_for_results(&self, context_message: &str) -> Result<String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.config.model, self.config.gemini_api_key
+        );
+
+        let request = GeminiRequest {
+            contents: vec![Content {
+                parts: vec![Part {
+                    text: context_message.to_string(),
+                }],
+            }],
+            generation_config: GenerationConfig {
+                temperature: self.config.temperature.unwrap_or(0.7),
+                max_output_tokens: self.config.max_tokens.unwrap_or(1000),
+            },
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        let response_text = response.text().await?;
+        
+        if response_text.contains("error") {
+            eprintln!("Gemini API Error: {}", response_text);
+            return Err(anyhow::anyhow!("Gemini API Error: {}", response_text));
+        }
+
+        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)?;
+        
+        if let Some(candidate) = gemini_response.candidates.first() {
+            if let Some(part) = candidate.content.parts.first() {
+                return Ok(self.format_bold_text(&part.text));
+            }
+        }
+
+        Err(anyhow::anyhow!("No response from Gemini"))
+    }
+
+    /// **text** 形式を太字に変換するヘルパーメソッド（現在は無効化）
+    fn format_bold_text(&self, text: &str) -> String {
+        // 太字処理は無効化し、元のテキストをそのまま返す
+        text.to_string()
     }
 }
