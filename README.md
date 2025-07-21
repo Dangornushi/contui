@@ -1,5 +1,8 @@
 # ConTUI - Gemini Chat TUI
 
+<img width="943" height="720" alt="Contui_sc" src="https://github.com/user-attachments/assets/441d3463-7685-40fb-ba09-2ee7b332dfc4" />
+
+
 RatatuiとGemini APIを使用したターミナルベースのチャットアプリケーションです。会話履歴を自動保存し、複数のセッションを管理できます。
 
 ## 必要な環境
