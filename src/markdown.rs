@@ -1,4 +1,11 @@
 use unicode_width::UnicodeWidthStr;
+use pulldown_cmark::{Parser, Event, Tag, TagEnd};
+use ratatui::{
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+};
+
+
 
 /// テキストを指定した幅で自動改行する
 pub fn wrap_text(text: &str, max_width: usize) -> String {
@@ -81,4 +88,88 @@ pub fn wrap_text(text: &str, max_width: usize) -> String {
     }
 
     wrapped_lines.join("\n")
+}
+
+/// マークダウンをパースしてratatui::text::Textに変換する
+pub fn render_markdown(markdown_text: &str, _max_width: usize) -> Text<'static> {
+    let parser = Parser::new(markdown_text);
+    let mut text = Text::default();
+    let mut current_line = Line::default();
+    let mut current_style = Style::default();
+    let mut _in_code_block = false;
+
+    for event in parser {
+        match event {
+            Event::Start(tag) => match tag {
+                Tag::Paragraph => {
+                    if !current_line.spans.is_empty() {
+                        text.lines.push(current_line);
+                        current_line = Line::default();
+                    }
+                }
+                Tag::CodeBlock(_) => {
+                    _in_code_block = true;
+                    if !current_line.spans.is_empty() {
+                        text.lines.push(current_line);
+                        current_line = Line::default();
+                    }
+                    current_style = Style::default().bg(Color::DarkGray).fg(Color::White);
+                }
+                Tag::Strong => {
+                    current_style = current_style.add_modifier(Modifier::BOLD);
+                }
+                Tag::Emphasis => {
+                    current_style = current_style.add_modifier(Modifier::ITALIC);
+                }
+                _ => {}
+            },
+            Event::End(tag_end) => match tag_end {
+                TagEnd::Paragraph => {
+                    if !current_line.spans.is_empty() {
+                        text.lines.push(current_line);
+                        current_line = Line::default();
+                    }
+                }
+                TagEnd::CodeBlock => {
+                    _in_code_block = false;
+                    if !current_line.spans.is_empty() {
+                        text.lines.push(current_line);
+                        current_line = Line::default();
+                    }
+                    current_style = Style::default();
+                }
+                TagEnd::Strong => {
+                    current_style = current_style.remove_modifier(Modifier::BOLD);
+                }
+                TagEnd::Emphasis => {
+                    current_style = current_style.remove_modifier(Modifier::ITALIC);
+                }
+                _ => {}
+            },
+            Event::Text(content) => {
+                if _in_code_block {
+                    current_line.spans.push(Span::styled(content.to_string(), Style::default().fg(Color::Cyan)));
+                } else {
+                    current_line.spans.push(Span::styled(content.to_string(), current_style));
+                }
+            },
+            Event::Code(content) => {
+                current_line.spans.push(Span::styled(content.to_string(), Style::default().fg(Color::Magenta)));
+            },
+            Event::SoftBreak => {
+                current_line.spans.push(Span::styled(" ".to_string(), current_style));
+            }
+            Event::HardBreak => {
+                text.lines.push(current_line);
+                current_line = Line::default();
+            }
+            _ => {}
+        }
+    }
+
+    if !current_line.spans.is_empty() {
+        text.lines.push(current_line);
+    }
+
+    text
 }

@@ -27,6 +27,9 @@ use config::Config;
 use gemini::GeminiClient;
 use history::HistoryManager;
 
+use tokio::sync::mpsc;
+use std::sync::Arc;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // 環境変数でテストモードを確認
@@ -50,6 +53,9 @@ async fn main() -> Result<()> {
     let config = Config::load("token.toml")?;
     println!("Configuration loaded successfully");
     
+    // イベントチャネルを作成
+    let (event_sender, event_receiver) = mpsc::unbounded_channel();
+
     // 履歴管理を初期化
     println!("Initializing history manager...");
     let history_manager = HistoryManager::new()?;
@@ -57,12 +63,28 @@ async fn main() -> Result<()> {
     
     // Geminiクライアントを作成
     println!("Creating Gemini client...");
-    let gemini_client = GeminiClient::new(config.llm);
+    let mut gemini_client = GeminiClient::new(config.llm, event_sender.clone());
+
+    // ファイルアクセス許可を設定（現在のディレクトリとホームディレクトリ）
+    let current_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .to_string();
+    if let Err(_e) = gemini_client.add_allowed_directory(&current_dir) {
+        // Directory access permission error - silently continue
+    }
+    if let Some(home_dir) = dirs::home_dir() {
+        if let Err(_e) = gemini_client.add_allowed_directory(&home_dir) {
+            // Directory access permission error - silently continue
+        }
+    }
+
+    let gemini_client = Arc::new(tokio::sync::Mutex::new(gemini_client));
     println!("Gemini client created");
     
     // アプリケーションを作成
     println!("Creating chat application...");
-    let mut app = ChatApp::new(gemini_client, history_manager);
+    let mut app = ChatApp::new(gemini_client, history_manager, event_sender, event_receiver);
     println!("Chat application created");
     
     // ターミナルをセットアップ

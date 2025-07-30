@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Text},
+    text::{Text, ToLine},
     widgets::{
         Block, BorderType, Borders, List, ListItem, ListState, Paragraph,
     },
@@ -11,25 +11,31 @@ use ratatui::{
 use tokio::sync::mpsc;
 use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
-use crate::markdown::wrap_text;
+
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
-use device_query::{DeviceQuery, DeviceState, Keycode};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
 
 #[derive(Debug)]
 pub enum ChatEvent {
     AIResponse(String),
     Error(String),
+    RequestCommandConfirmation(String),
+    ToolCallStatus(String),
+    RefreshDirectory,
+    TodoListUpdated(Vec<TodoItem>),
 }
 
 pub struct ChatApp {
     pub input: String,
-    pub cursor_position: usize,  // カーソルの位置（グラフィフィー単位）
-    pub visual_start: Option<usize>,  // Visual Modeの開始位置
+    pub cursor_position: usize,
+    pub visual_start: Option<usize>,
     pub messages: Vec<ChatMessage>,
     pub input_mode: InputMode,
-    pub gemini_client: GeminiClient,
+    pub gemini_client: Arc<Mutex<GeminiClient>>,
     pub event_sender: mpsc::UnboundedSender<ChatEvent>,
     pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
     pub is_loading: bool,
@@ -41,12 +47,20 @@ pub struct ChatApp {
     pub current_directory: String,
     pub directory_contents: Vec<String>,
     pub selected_files: Vec<String>,
-    pub input_line_count: usize,  // 入力フィールドの行数
-    pub device_state: DeviceState,  // リアルタイムキー状態監視
-    pub input_history: Vec<String>,  // プロンプト履歴
-    pub history_index: Option<usize>,  // 現在の履歴インデックス
-    pub temp_input: String,  // 履歴ナビゲーション中の一時的な入力
-    pub show_help: bool,  // ヘルプウィンドウ表示フラグ
+    pub input_line_count: usize,
+    pub input_history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub temp_input: String,
+    pub show_help: bool,
+    pub pending_command: Option<String>,
+    pub todo_list: Vec<TodoItem>,
+    pub current_todo_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TodoItem {
+    pub description: String,
+    pub completed: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -56,6 +70,7 @@ pub enum InputMode {
     Visual,
     SessionList,
     FileBrowser,
+    ConfirmCommand,
 }
 
 #[derive(Debug)]
@@ -65,9 +80,12 @@ pub struct ChatMessage {
 }
 
 impl ChatApp {
-    pub fn new(mut gemini_client: GeminiClient, mut history_manager: HistoryManager) -> Self {
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        
+    pub fn new(
+        gemini_client: Arc<Mutex<GeminiClient>>,
+        mut history_manager: HistoryManager,
+        event_sender: mpsc::UnboundedSender<ChatEvent>,
+        event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
+    ) -> Self {
         // アクティブなセッションを確保
         let _session_id = history_manager.ensure_active_session();
         
@@ -88,16 +106,6 @@ impl ChatApp {
             .to_string_lossy()
             .to_string();
 
-        // ファイルアクセス許可を設定（現在のディレクトリとホームディレクトリ）
-        if let Err(_e) = gemini_client.add_allowed_directory(&current_dir) {
-            // Directory access permission error - silently continue
-        }
-        if let Some(home_dir) = dirs::home_dir() {
-            if let Err(_e) = gemini_client.add_allowed_directory(&home_dir) {
-                // Directory access permission error - silently continue
-            }
-        }
-        
         let mut app = Self {
             input: String::new(),
             cursor_position: 0,
@@ -117,11 +125,14 @@ impl ChatApp {
             directory_contents: Vec::new(),
             selected_files: Vec::new(),
             input_line_count: 1,  // 初期値は1行
-            device_state: DeviceState::new(),  // リアルタイムキー状態監視を初期化
-            input_history: Vec::new(),  // プロンプト履歴を初期化
-            history_index: None,  // 履歴インデックスを初期化
-            temp_input: String::new(),  // 一時的な入力を初期化
-            show_help: false,  // ヘルプウィンドウは初期状態では非表示
+            
+            input_history: Vec::new(),  // プロンプト履歴
+            history_index: None,  // 現在の履歴インデックス
+            temp_input: String::new(),
+            show_help: false,
+            pending_command: None,
+            todo_list: Vec::new(),
+            current_todo_index: None,
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
@@ -149,6 +160,7 @@ impl ChatApp {
             InputMode::Visual => self.handle_visual_mode_key(key_event),
             InputMode::SessionList => self.handle_session_list_key(key_event),
             InputMode::FileBrowser => self.handle_file_browser_key(key_event),
+            InputMode::ConfirmCommand => self.handle_confirm_command_key(key_event),
         }
     }
 
@@ -315,33 +327,14 @@ impl ChatApp {
                 }
             }
             KeyCode::Enter => {
-                // device_queryを使ってリアルタイムでShiftキーの状態を確認
-                let keys = self.device_state.get_keys();
-                let shift_pressed = keys.contains(&Keycode::LShift) || keys.contains(&Keycode::RShift);
-                
-                // CRITICAL: device_queryでShiftが検出された場合は絶対に送信しない
-                if shift_pressed {
-                    self.insert_char('\n');
-                    self.update_input_line_count();
-                    return Ok(false);
-                }
-                
-                // クロスターム側でもShiftをチェック（二重保護）
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     self.insert_char('\n');
                     self.update_input_line_count();
                     return Ok(false);
                 }
                 
-                // 修飾子が完全に空で、Shiftが押されていない場合のみ送信処理
-                if key_event.modifiers.is_empty() && !shift_pressed {
-                    if !self.input.trim().is_empty() {
-                        self.send_message();
-                    } else {
-                        // 空の入力の場合は何もしない（改行もしない）
-                    }
-                } else {
-                    // 任意の修飾子がある場合は何もしない
+                if !self.input.trim().is_empty() {
+                    self.send_message();
                 }
             }
             KeyCode::Char(c) => {
@@ -759,16 +752,13 @@ impl ChatApp {
     pub fn handle_chat_event(&mut self, event: ChatEvent) {
         match event {
             ChatEvent::AIResponse(msg) => {
-                // ファイル作成要求を処理
-                let processed_msg = self.process_file_creation_requests(&msg);
-                
-                // 履歴管理にAIレスポンスを追加（処理後のメッセージ）
-                if let Err(_) = self.history_manager.get_history_mut().add_message(processed_msg.clone(), false) {
+                // 履歴管理にAIレスポンスを追加
+                if let Err(_) = self.history_manager.get_history_mut().add_message(msg.clone(), false) {
                     // エラーは無視
                 }
                 
                 self.messages.push(ChatMessage {
-                    content: processed_msg,
+                    content: msg,
                     is_user: false,
                 });
                 self.is_loading = false;
@@ -780,11 +770,39 @@ impl ChatApp {
                 }
             }
             ChatEvent::Error(err) => {
+                let display_error = if let Some(stripped) = err.strip_prefix("Gemini API Error: ") {
+                    format!("API Error: {}", stripped)
+                } else if let Some(stripped) = err.strip_prefix("Gemini API Unknown Error: ") {
+                    format!("Unknown API Error: {}", stripped)
+                } else {
+                    format!("Error: {}", err)
+                };
                 self.messages.push(ChatMessage {
-                    content: format!("Error: {}", err),
+                    content: display_error,
                     is_user: false,
                 });
                 self.is_loading = false;
+                self.scroll_to_bottom();
+            }
+            ChatEvent::RequestCommandConfirmation(command) => {
+                self.pending_command = Some(command);
+                self.input_mode = InputMode::ConfirmCommand;
+                self.is_loading = false;
+                self.scroll_to_bottom();
+            }
+            ChatEvent::ToolCallStatus(status_message) => {
+                self.messages.push(ChatMessage {
+                    content: format!("🤖 {}", status_message), // AIからのステータスとして表示
+                    is_user: false,
+                });
+                self.scroll_to_bottom();
+            }
+            ChatEvent::RefreshDirectory => {
+                self.refresh_directory_contents();
+            }
+            ChatEvent::TodoListUpdated(todo_list) => {
+                self.todo_list = todo_list;
+                self.current_todo_index = self.todo_list.iter().position(|item| !item.completed);
                 self.scroll_to_bottom();
             }
         }
@@ -846,13 +864,13 @@ impl ChatApp {
             let result = if file_paths.is_empty() {
                 // ファイルなしの通常チャット
                 if context.is_empty() {
-                    client.chat(&message_to_send).await
+                    client.lock().await.chat(&message_to_send).await
                 } else {
-                    client.chat_with_context(&message_to_send, &context).await
+                    client.lock().await.chat_with_context(&message_to_send, &context).await
                 }
             } else {
                 // ファイル付きチャット
-                client.chat_with_file_context(&message_to_send, &file_paths, &context).await
+                client.lock().await.chat_with_file_context(&message_to_send, &file_paths, &context).await
             };
 
             match result {
@@ -923,7 +941,8 @@ impl ChatApp {
 
     // ファイルブラウザ関連のメソッド
     fn refresh_directory_contents(&mut self) {
-        match self.gemini_client.list_directory(&self.current_directory) {
+        // list_directoryは同期関数なので、tokio::spawnで囲む必要はない
+        match self.gemini_client.blocking_lock().list_directory(&self.current_directory) {
             Ok(contents) => {
                 self.directory_contents = contents;
             }
@@ -1073,152 +1092,15 @@ impl ChatApp {
         (clean_message.trim().to_string(), all_files)
     }
 
-    // AIレスポンスからファイル作成要求を解析・実行
-    fn process_file_creation_requests(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        
-        // ```create_file:filename の形式でファイル作成要求を検索
-        // より柔軟な正規表現：複数行にわたる内容とsフラグを使用
-        let create_file_pattern = r"(?s)```create_file:([^\n\r]+)(?:\r?\n(.*?))?```";
-        
-        // Regexを使えない場合は手動で解析
-        let re = match regex::Regex::new(create_file_pattern) {
-            Ok(regex) => regex,
-            Err(_) => {
-                return self.manual_parse_file_creation(response);
-            }
-        };
-        
-        let mut files_created = Vec::new();
-        
-        let matches: Vec<_> = re.captures_iter(response).collect();
-        
-        // マッチが空の場合は、ファイル作成要求がないということなので、そのまま元のレスポンスを返す
-        if matches.is_empty() {
-            return response.to_string();
-        }
-        
-        // マッチした全てのファイル作成要求を処理
-        for caps in matches.iter() {
-            if let Some(filename_match) = caps.get(1) {
-                let filename = filename_match.as_str().trim();
-                let content = caps.get(2).map(|m| m.as_str()).unwrap_or(""); // 内容がない場合は空文字列
-                
-                // 重複チェック付きでファイル作成
-                match self.gemini_client.create_file_with_unique_name(filename, content) {
-                    Ok(actual_filename) => {
-                        files_created.push(actual_filename.clone());
-                        
-                        // 元のファイル作成コードブロックを成功メッセージに置換
-                        let success_message = if actual_filename == filename {
-                            format!("✅ File '{}' created successfully!", filename)
-                        } else {
-                            format!("✅ File '{}' created as '{}' (original name was taken)", filename, actual_filename)
-                        };
-                        
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &success_message
-                        );
-                    }
-                    Err(e) => {
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &format!("❌ Failed to create file '{}': {}", filename, e)
-                        );
-                        continue;
-                    }
-                }
-            }
-        }
-        
-        if !files_created.is_empty() {
-            // ファイルブラウザのコンテンツを更新
-            self.refresh_directory_contents();
-            
-            // 作成されたファイルのサマリーを追加
-            let summary = format!("\n\n📁 Created {} file(s): {}", 
-                files_created.len(), 
-                files_created.join(", ")
-            );
-            processed_response.push_str(&summary);
-        }
-        
-        processed_response
-    }
-
-    // Regexが使えない場合の手動解析
-    fn manual_parse_file_creation(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        let mut files_created = Vec::new();
-        
-        // ```create_file: で始まる行を検索
-        let lines: Vec<&str> = response.lines().collect();
-        let mut i = 0;
-        
-        while i < lines.len() {
-            if lines[i].starts_with("```create_file:") {
-                // ファイル名を抽出
-                let filename = lines[i].strip_prefix("```create_file:").unwrap_or("").trim();
-                if filename.is_empty() {
-                    i += 1;
-                    continue;
-                }
-                
-                // コンテンツを収集（次の ``` まで）
-                let mut content_lines = Vec::new();
-                i += 1;
-                
-                while i < lines.len() && !lines[i].starts_with("```") {
-                    content_lines.push(lines[i]);
-                    i += 1;
-                }
-                
-                let content = content_lines.join("\n");
-                
-                // ファイルを作成（重複チェック付き）
-                match self.gemini_client.create_file_with_unique_name(filename, &content) {
-                    Ok(actual_filename) => {
-                        files_created.push(actual_filename.clone());
-                        
-                        // 成功メッセージで置換
-                        let original_block = format!("```create_file:{}\n{}\n```", filename, content);
-                        let success_message = if actual_filename == filename {
-                            format!("✅ File '{}' created successfully!", filename)
-                        } else {
-                            format!("✅ File '{}' created as '{}' (original name was taken)", filename, actual_filename)
-                        };
-                        processed_response = processed_response.replace(&original_block, &success_message);
-                    }
-                    Err(e) => {
-                        // エラーメッセージで置換
-                        let original_block = format!("```create_file:{}\n{}\n```", filename, content);
-                        let error_msg = format!("❌ Failed to create file '{}': {}", filename, e);
-                        processed_response = processed_response.replace(&original_block, &error_msg);
-                    }
-                }
-            }
-            i += 1;
-        }
-        
-        if !files_created.is_empty() {
-            self.refresh_directory_contents();
-            
-            let summary = format!("\n\n📁 Created {} file(s): {}", 
-                files_created.len(), 
-                files_created.join(", ")
-            );
-            processed_response.push_str(&summary);
-        }
-        
-        processed_response
-    }
+    
 
     pub fn render(&mut self, f: &mut Frame) {
         if self.input_mode == InputMode::SessionList {
             self.render_session_list(f);
         } else if self.input_mode == InputMode::FileBrowser {
             self.render_file_browser(f);
+        } else if self.input_mode == InputMode::ConfirmCommand {
+            self.render_command_confirmation(f);
         } else {
             // 入力フィールドの高さを計算（最小3行、最大10行）
             let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
@@ -1234,11 +1116,60 @@ impl ChatApp {
             self.render_messages(f, chunks[0]);
             self.render_input(f, chunks[1]);
             
+            // TODOリストを表示
+            if !self.todo_list.is_empty() {
+                self.render_todo_list(f);
+            }
+
             // フローティングヘルプウィンドウを表示
             if self.show_help {
                 self.render_floating_help(f);
             }
         }
+    }
+
+    fn render_todo_list(&self, f: &mut Frame) {
+        let area = f.area();
+        let todo_width = 40.min(area.width / 2);
+        let todo_height = (self.todo_list.len() as u16 + 2).min(area.height - 4);
+
+        let todo_area = Rect {
+            x: area.width - todo_width - 1,
+            y: 1,
+            width: todo_width,
+            height: todo_height,
+        };
+
+        let todo_items: Vec<ListItem> = self.todo_list
+            .iter()
+            .enumerate()
+            .map(|(i, item)| {
+                let status = if item.completed { "[x]" } else { "[ ]" };
+                let description = &item.description;
+                let mut style = Style::default().fg(Color::White);
+
+                if item.completed {
+                    style = style.add_modifier(Modifier::DIM);
+                }
+                if self.current_todo_index == Some(i) {
+                    style = style.add_modifier(Modifier::BOLD).fg(Color::Cyan);
+                }
+
+                ListItem::new(format!("{} {}", status, description)).style(style)
+            })
+            .collect();
+
+        let todo_list_widget = List::new(todo_items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("TODO List")
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Magenta)),
+            )
+            .highlight_style(Style::default());
+
+        f.render_widget(todo_list_widget, todo_area);
     }
 
     fn render_messages(&mut self, f: &mut Frame, area: Rect) {
@@ -1250,7 +1181,7 @@ impl ChatApp {
                 let style = if msg.is_user {
                     Style::default().fg(Color::Green)
                 } else {
-                    Style::default().fg(Color::Blue)
+                    Style::default().fg(Color::White)
                 };
                 
                 let prefix = if msg.is_user { "You" } else { "AI" };
@@ -1263,22 +1194,24 @@ impl ChatApp {
                     1 
                 };
                 
-                // wrap_text関数を使用してテキストを改行
-                let wrapped_content = wrap_text(&content, max_width);
+                // render_markdown が Text を返すので、それを直接 ListItem に渡す
+                let rendered_text = crate::markdown::render_markdown(&content, max_width);
                 
-                ListItem::new(Text::from(wrapped_content)).style(style)
+                ListItem::new(rendered_text).style(style)
             })
             .collect();
 
+        let messages_list_title = Text::styled(" Chat History ", Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD));
         let messages_list = List::new(messages)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Chat History")
-                    .border_type(BorderType::Rounded),
+                    .title(messages_list_title.to_line())
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ");
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol("➤ ");
 
         f.render_stateful_widget(messages_list, area, &mut self.list_state);
 
@@ -1315,6 +1248,7 @@ impl ChatApp {
             InputMode::Visual => Style::default().fg(Color::Magenta),
             InputMode::SessionList => Style::default().fg(Color::Cyan),
             InputMode::FileBrowser => Style::default().fg(Color::Cyan),
+            InputMode::ConfirmCommand => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         };
 
         let title = match self.input_mode {
@@ -1323,16 +1257,19 @@ impl ChatApp {
             InputMode::Visual => "Visual Mode (Select text, press 'd' to delete, 'y' to yank, Esc to exit)",
             InputMode::SessionList => "Session List (Press Enter to select, 'd' to delete, 'n' for new)",
             InputMode::FileBrowser => "File Browser (Press Enter to open, 'd' to delete, 'n' for new)",
+            InputMode::ConfirmCommand => "Confirm Command (y/N)",
         };
 
+        let input_title = Text::styled(title, Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD));
         let input = Paragraph::new(self.input.as_str())
             .style(input_style)
             .wrap(ratatui::widgets::Wrap { trim: false })
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(title)
-                    .border_type(BorderType::Rounded),
+                    .title(input_title.to_line())
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             );
 
         f.render_widget(input, area);
@@ -1423,6 +1360,9 @@ impl ChatApp {
             }
             InputMode::FileBrowser => {
                 // ファイルブラウザモードではカーソル非表示
+            }
+            InputMode::ConfirmCommand => {
+                // コマンド確認モードではカーソル非表示
             }
         }
     }
@@ -1570,16 +1510,27 @@ impl ChatApp {
                 "Help:",
                 "  Ctrl+H              - Toggle this help window",
             ],
+            InputMode::ConfirmCommand => vec![
+                "=== Confirm Command Mode ===",
+                "",
+                "Actions:",
+                "  y                   - Execute command",
+                "  n or Esc            - Cancel command",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
         };
 
         // ヘルプテキストを上から重ねてレンダリング
         let content = Text::from(help_text.join("\n"));
+        let help_title_styled = Text::styled(" Help (Press Ctrl+H to close) ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
         let help_paragraph = Paragraph::new(content)
             .style(Style::default().fg(Color::White).bg(Color::Black))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Help (Press Ctrl+H to close) ")
+                    .title(help_title_styled.to_line())
                     .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(Color::Cyan))
@@ -1622,12 +1573,14 @@ impl ChatApp {
             })
             .collect();
 
+        let session_list_title = Text::styled(" Chat Sessions ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD));
         let session_list = List::new(session_items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Chat Sessions")
+                    .title(session_list_title.to_line())
                     .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol(">> ");
@@ -1635,12 +1588,14 @@ impl ChatApp {
         f.render_stateful_widget(session_list, chunks[0], &mut self.session_list_state);
 
         // ヘルプテキストを表示
+        let help_title = Text::styled(" Help ", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD));
         let help = Paragraph::new("Use j/k to navigate, Enter to select, d to delete, n for new session, q/Esc to go back")
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Help")
+                    .title(help_title.to_line())
                     .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
             .style(Style::default().fg(Color::Gray));
 
@@ -1659,8 +1614,8 @@ impl ChatApp {
             .split(f.area());
 
         // タイトル
-        let title = Paragraph::new(format!("File Browser: {}", self.current_directory))
-            .style(Style::default().fg(Color::Yellow));
+        let file_browser_title = Text::styled(format!(" File Browser: {} ", self.current_directory), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        let title = Paragraph::new(file_browser_title.to_line());
         f.render_widget(title, chunks[0]);
 
         // ディレクトリコンテンツ
@@ -1688,12 +1643,14 @@ impl ChatApp {
             })
             .collect();
 
+        let files_and_directories_title = Text::styled(" Files and Directories ", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD));
         let list = List::new(items)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Files and Directories")
-                    .border_type(BorderType::Rounded),
+                    .title(files_and_directories_title.to_line())
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
             .highlight_style(
                 Style::default()
@@ -1711,24 +1668,28 @@ impl ChatApp {
             self.input.clone()
         };
 
+        let message_input_title = Text::styled(" Message Input ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD));
         let input_paragraph = Paragraph::new(input_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Message Input")
-                    .border_type(BorderType::Rounded),
+                    .title(message_input_title.to_line())
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
             .style(Style::default().fg(Color::White));
         f.render_widget(input_paragraph, chunks[2]);
 
         // ヘルプ
         let help_text = "↑/↓: Navigate | Enter: Add to input | Space: Toggle | u: Parent | r: Refresh | q: Back";
+        let help_block_title = Text::styled(" Help ", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD));
         let help = Paragraph::new(help_text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Help")
-                    .border_type(BorderType::Rounded),
+                    .title(help_block_title.to_line())
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::DarkGray)),
             )
             .style(Style::default().fg(Color::Gray));
         f.render_widget(help, chunks[3]);
@@ -1918,4 +1879,96 @@ impl ChatApp {
         self.history_index = None;
         self.temp_input.clear();
     }
+
+    fn render_command_confirmation(&self, f: &mut Frame) {
+        let area = f.area();
+        let popup_width = 80.min(area.width - 4);
+        let popup_height = 10.min(area.height - 4);
+
+        let popup_area = Rect {
+            x: (area.width - popup_width) / 2,
+            y: (area.height - popup_height) / 2,
+            width: popup_width,
+            height: popup_height,
+        };
+
+        let confirm_command_title = Text::styled(" Confirm Command Execution ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+        f.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(confirm_command_title.to_line())
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red)),
+            popup_area,
+        );
+
+        let command_text = format!("Execute command?\n\n`{}`\n\n(y/N)", self.pending_command.as_deref().unwrap_or(""));
+        let paragraph = Paragraph::new(command_text)
+            .style(Style::default().fg(Color::White))
+            .alignment(ratatui::layout::Alignment::Center)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+
+        let inner_area = popup_area.inner(ratatui::layout::Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        f.render_widget(paragraph, inner_area);
+    }
+
+    fn handle_confirm_command_key(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        match key_event.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(command) = self.pending_command.take() {
+                    self.input_mode = InputMode::Normal;
+                    self.is_loading = true; // コマンド実行中はローディング表示
+                    let sender = self.event_sender.clone();
+                    let client = self.gemini_client.clone();
+                    tokio::spawn(async move {
+                        let result = client.lock().await.execute_command(&command).await;
+                        match result {
+                            Ok(cmd_result) => {
+                                // コマンド実行結果をLLMにフィードバック
+                                let feedback_message = format!(
+                                    "ユーザーがコマンドの実行を許可しました。以下のコマンドが実行され、結果が得られました。この結果について解説してください。
+
+コマンド: `{}`
+ステータス: {}
+終了コード: {:?}
+標準出力:
+```
+{}
+```
+標準エラー出力:
+```
+{}
+```",
+                                    cmd_result.command,
+                                    if cmd_result.success { "成功" } else { "失敗" },
+                                    cmd_result.exit_code,
+                                    cmd_result.stdout,
+                                    cmd_result.stderr
+                                );
+                                let _ = sender.send(ChatEvent::AIResponse(feedback_message));
+                            }
+                            Err(e) => {
+                                let _ = sender.send(ChatEvent::Error(format!("コマンド実行エラー: {}", e)));
+                            }
+                        }
+                    });
+                }
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                if let Some(command) = self.pending_command.take() {
+                    self.input_mode = InputMode::Normal;
+                    // ユーザーが拒否したことをLLMにフィードバック
+                    let feedback_message = format!("ユーザーがコマンドの実行を拒否しました: `{}`", command);
+                    let _ = self.event_sender.send(ChatEvent::AIResponse(feedback_message));
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
 }
+
+    
