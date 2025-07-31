@@ -152,4 +152,37 @@ impl FileAccessManager {
         
         Ok(timestamp_path)
     }
+    /// 指定ファイルの指定行範囲を新しい内容で置換する
+    pub fn edit_file_range<P: AsRef<Path>>(
+        &self,
+        path: P,
+        start_line: usize,
+        end_line: usize,
+        new_content: &str,
+    ) -> Result<()> {
+        if !self.is_path_allowed(&path)? {
+            return Err(anyhow!("Access denied to path: {:?}", path.as_ref()));
+        }
+        let file_path = path.as_ref();
+        let original = fs::read_to_string(file_path)?;
+        let mut lines: Vec<&str> = original.lines().collect();
+
+        if start_line == 0 || end_line < start_line || end_line > lines.len() {
+            return Err(anyhow!("Invalid line range"));
+        }
+
+        // 0-based index
+        let start = start_line - 1;
+        let end = end_line;
+
+        let mut result = Vec::new();
+        result.extend_from_slice(&lines[..start]);
+        for l in new_content.lines() {
+            result.push(l);
+        }
+        result.extend_from_slice(&lines[end..]);
+
+        fs::write(file_path, result.join("\n"))?;
+        Ok(())
+    }
 }

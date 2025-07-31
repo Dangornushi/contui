@@ -47,6 +47,7 @@ pub struct ChatApp {
     pub history_index: Option<usize>,  // 現在の履歴インデックス
     pub temp_input: String,  // 履歴ナビゲーション中の一時的な入力
     pub show_help: bool,  // ヘルプウィンドウ表示フラグ
+    pub notification: Option<String>, // ファイル作成通知など一時的な表示
 }
 
 #[derive(Debug, PartialEq)]
@@ -122,6 +123,7 @@ impl ChatApp {
             history_index: None,  // 履歴インデックスを初期化
             temp_input: String::new(),  // 一時的な入力を初期化
             show_help: false,  // ヘルプウィンドウは初期状態では非表示
+            notification: None, // ← 追加
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
@@ -139,6 +141,7 @@ impl ChatApp {
     }
 
     pub fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        self.notification = None;
         if key_event.kind != KeyEventKind::Press {
             return Ok(false);
         }
@@ -767,13 +770,6 @@ impl ChatApp {
                     // エラーは無視
                 }
                 
-                self.messages.push(ChatMessage {
-                    content: processed_msg,
-                    is_user: false,
-                });
-                self.is_loading = false;
-                self.scroll_to_bottom();
-                
                 // 自動保存
                 if let Err(_) = self.save_history() {
                     // エラーは無視
@@ -791,6 +787,7 @@ impl ChatApp {
     }
 
     fn send_message(&mut self) {
+        self.notification = None;
         let original_message = self.input.clone();
 
         // /clearlogコマンド判定
@@ -1107,10 +1104,7 @@ impl ChatApp {
         let mut processed_response = response.to_string();
         
         // ```create_file:filename の形式でファイル作成要求を検索
-        // より柔軟な正規表現：複数行にわたる内容とsフラグを使用
         let create_file_pattern = r"(?s)```create_file:([^\n\r]+)(?:\r?\n(.*?))?```";
-        
-        // Regexを使えない場合は手動で解析
         let re = match regex::Regex::new(create_file_pattern) {
             Ok(regex) => regex,
             Err(_) => {
@@ -1119,32 +1113,23 @@ impl ChatApp {
         };
         
         let mut files_created = Vec::new();
-        
         let matches: Vec<_> = re.captures_iter(response).collect();
-        
-        // マッチが空の場合は、ファイル作成要求がないということなので、そのまま元のレスポンスを返す
         if matches.is_empty() {
             return response.to_string();
         }
         
-        // マッチした全てのファイル作成要求を処理
         for caps in matches.iter() {
             if let Some(filename_match) = caps.get(1) {
                 let filename = filename_match.as_str().trim();
-                let content = caps.get(2).map(|m| m.as_str()).unwrap_or(""); // 内容がない場合は空文字列
-                
-                // 重複チェック付きでファイル作成
+                let content = caps.get(2).map(|m| m.as_str()).unwrap_or("");
                 match self.gemini_client.create_file_with_unique_name(filename, content) {
                     Ok(actual_filename) => {
                         files_created.push(actual_filename.clone());
-                        
-                        // 元のファイル作成コードブロックを成功メッセージに置換
                         let success_message = if actual_filename == filename {
                             format!("✅ File '{}' created successfully!", filename)
                         } else {
                             format!("✅ File '{}' created as '{}' (original name was taken)", filename, actual_filename)
                         };
-                        
                         processed_response = processed_response.replace(
                             &caps[0],
                             &success_message
@@ -1162,15 +1147,9 @@ impl ChatApp {
         }
         
         if !files_created.is_empty() {
-            // ファイルブラウザのコンテンツを更新
             self.refresh_directory_contents();
-            
-            // 作成されたファイルのサマリーを追加
-            let summary = format!("\n\n📁 Created {} file(s): {}", 
-                files_created.len(), 
-                files_created.join(", ")
-            );
-            processed_response.push_str(&summary);
+            let summary = format!("📁 ファイル作成: {}", files_created.join(", "));
+            self.notification = Some(summary);
         }
         
         processed_response
@@ -1249,21 +1228,22 @@ impl ChatApp {
         } else if self.input_mode == InputMode::FileBrowser {
             self.render_file_browser(f);
         } else {
-            // 入力フィールドの高さを計算（最小3行、最大10行）
             let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
-            
+            let notification_height = if self.notification.is_some() { 2 } else { 0 };
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(3),  // メッセージエリア（残りの領域）
-                    Constraint::Length(input_height),  // 入力エリア（動的に変更）
+                    Constraint::Min(3),
+                    Constraint::Length(notification_height),
+                    Constraint::Length(input_height),
                 ])
                 .split(f.area());
 
             self.render_messages(f, chunks[0]);
-            self.render_input(f, chunks[1]);
-            
-            // フローティングヘルプウィンドウを表示
+            if let Some(ref note) = self.notification {
+                self.render_notification(f, chunks[1], note);
+            }
+            self.render_input(f, chunks[2]);
             if self.show_help {
                 self.render_floating_help(f);
             }
@@ -1946,5 +1926,19 @@ impl ChatApp {
     fn reset_history_navigation(&mut self) {
         self.history_index = None;
         self.temp_input.clear();
+    }
+}
+
+impl ChatApp {
+    fn render_notification(&self, f: &mut Frame, area: Rect, note: &str) {
+        let notification = Paragraph::new(note)
+            .style(Style::default().fg(Color::Yellow).bg(Color::Black).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Notification")
+                    .border_type(BorderType::Rounded),
+            );
+        f.render_widget(notification, area);
     }
 }

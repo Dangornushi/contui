@@ -81,7 +81,22 @@ impl GeminiClient {
 
     // システムプロンプトを作成
     fn get_system_prompt(&self) -> String {
-        r#"あなたはファイル作成機能とコマンド実行機能を持つAIアシスタントです。
+        r#"あなたはファイル作成・部分編集・コマンド実行機能を持つAIアシスタントです。
+
+## 部分編集機能
+ユーザーがファイルの一部だけを編集したい場合、以下の形式で部分編集できます：
+
+```edit_file:ファイル名:開始行:終了行
+新しい内容
+```
+
+- 開始行・終了行は1始まりの行番号です（例：1〜3なら1,2,3行目）。
+- 編集可能かどうかは、編集範囲がファイル内に収まっているか、編集内容が部分的に適用できるかで判定してください。
+- 可能な場合は部分編集を優先し、edit_file形式で指示してください。
+- 編集が困難な場合は、従来通りcreate_file形式で全体を書き換えてください。
+
+## ファイル作成機能
+ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
 
 ## ファイル作成機能
 ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
@@ -162,13 +177,13 @@ chmod +x script.sh
         let mut has_actions = false;
         let mut command_results = Vec::new();
         let mut created_files = Vec::new();
-        
+        let mut edited_files = Vec::new();
+
         // ファイル作成が含まれているかチェックして自動実行
         if response_text.contains("```create_file:") {
             has_actions = true;
             match self.process_file_creation_response(response_text) {
                 Ok(files) => {
-                    self.print_file_creation_summary(&files);
                     created_files = files;
                 }
                 Err(e) => {
@@ -176,7 +191,7 @@ chmod +x script.sh
                 }
             }
         }
-        
+
         // コマンド実行が含まれているかチェックして自動実行
         if response_text.contains("```execute_command") {
             has_actions = true;
@@ -189,13 +204,26 @@ chmod +x script.sh
                 }
             }
         }
-        
+
+        // 部分編集が含まれているかチェックして自動実行
+        if response_text.contains("```edit_file:") {
+            has_actions = true;
+            match self.process_edit_file_response(response_text) {
+                Ok(files) => {
+                    edited_files = files;
+                }
+                Err(e) => {
+                    eprintln!("部分編集エラー: {}", e);
+                }
+            }
+        }
+
         // アクションが実行された場合、結果を含めてAIに再度問い合わせ
         if has_actions {
             let mut context_message = String::new();
             context_message.push_str("以下のアクションが実行されました。結果を確認して、適切な回答やコメントをしてください：\n\n");
             context_message.push_str(&format!("元のリクエスト: {}\n\n", original_message));
-            
+
             if !created_files.is_empty() {
                 context_message.push_str(&format!("作成されたファイル ({} 個):\n", created_files.len()));
                 for file in &created_files {
@@ -203,33 +231,41 @@ chmod +x script.sh
                 }
                 context_message.push('\n');
             }
-            
+
+            if !edited_files.is_empty() {
+                context_message.push_str(&format!("部分編集されたファイル ({} 個):\n", edited_files.len()));
+                for file in &edited_files {
+                    context_message.push_str(&format!("- {}\n", file));
+                }
+                context_message.push('\n');
+            }
+
             if !command_results.is_empty() {
                 context_message.push_str("コマンド実行結果:\n");
                 for (i, result) in command_results.iter().enumerate() {
                     context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
                     context_message.push_str(&format!("   ステータス: {}\n", if result.success { "成功" } else { "失敗" }));
-                    
+
                     if let Some(code) = result.exit_code {
                         context_message.push_str(&format!("   終了コード: {}\n", code));
                     }
-                    
+
                     if !result.stdout.is_empty() {
                         context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
                     }
-                    
+
                     if !result.stderr.is_empty() {
                         context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
                     }
                     context_message.push('\n');
                 }
             }
-            
+
             // AIに再度問い合わせて結果に基づく回答を取得
             let result = self.get_ai_response_for_results(&context_message).await?;
             return Ok(self.format_bold_text(&result));
         }
-        
+
         Ok(self.format_bold_text(response_text))
     }
 
@@ -716,5 +752,59 @@ chmod +x script.sh
     fn format_bold_text(&self, text: &str) -> String {
         // 太字処理は無効化し、元のテキストをそのまま返す
         text.to_string()
+    }
+    /// LLMレスポンスから edit_file: 形式のブロックを解析して部分編集を実行
+    pub fn process_edit_file_response(&self, response: &str) -> Result<Vec<String>> {
+        let mut edited_files = Vec::new();
+        let lines: Vec<&str> = response.lines().collect();
+        let mut i = 0;
+
+        while i < lines.len() {
+            let line = lines[i];
+            // edit_file:ファイル名:開始行:終了行 の開始を検出
+            if line.starts_with("```edit_file:") {
+                let header = line.trim_start_matches("```edit_file:").trim();
+                let parts: Vec<&str> = header.split(':').collect();
+                if parts.len() != 3 {
+                    i += 1;
+                    continue;
+                }
+                let filename = parts[0].trim();
+                let start_line = parts[1].trim().parse::<usize>().unwrap_or(0);
+                let end_line = parts[2].trim().parse::<usize>().unwrap_or(0);
+                if filename.is_empty() || start_line == 0 || end_line == 0 {
+                    i += 1;
+                    continue;
+                }
+
+                // 編集内容を収集
+                let mut content = String::new();
+                i += 1;
+                while i < lines.len() && !lines[i].starts_with("```") {
+                    if !content.is_empty() {
+                        content.push('\n');
+                    }
+                    content.push_str(lines[i]);
+                    i += 1;
+                }
+
+                // 部分編集を実行
+                match self.file_access.edit_file_range(filename, start_line, end_line, &content) {
+                    Ok(_) => {
+                        edited_files.push(filename.to_string());
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("❌ 部分編集失敗 '{}': {}", filename, e));
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        if edited_files.is_empty() {
+            return Err(anyhow::anyhow!("レスポンスにedit_fileブロックが見つかりませんでした"));
+        }
+
+        Ok(edited_files)
     }
 }
