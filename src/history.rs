@@ -37,6 +37,20 @@ impl ChatHistory {
         }
     }
 
+    /// 現在のセッションのメッセージを全て削除
+    pub fn clear_messages(&mut self) -> Result<()> {
+        let session_id = self.current_session_id.ok_or_else(|| {
+            anyhow::anyhow!("No active session")
+        })?;
+        if let Some(session) = self.sessions.get_mut(&session_id) {
+            session.messages.clear();
+            session.updated_at = Utc::now();
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Session not found"))
+        }
+    }
+
     pub fn new_session(&mut self, title: Option<String>) -> Uuid {
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -130,6 +144,13 @@ impl HistoryManager {
             history,
             file_path,
         })
+    }
+
+    /// 現在のセッションのメッセージを全て削除
+    pub fn clear_messages(&mut self) -> Result<()> {
+        self.history.clear_messages()?;
+        self.save()?;
+        Ok(())
     }
 
     pub fn save(&self) -> Result<()> {

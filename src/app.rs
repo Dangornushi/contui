@@ -792,6 +792,35 @@ impl ChatApp {
 
     fn send_message(&mut self) {
         let original_message = self.input.clone();
+
+        // /clearlogコマンド判定
+        if original_message.trim() == "/clearlog" {
+            match self.history_manager.clear_messages() {
+                Ok(_) => {
+                    self.messages.clear();
+                    self.messages.push(ChatMessage {
+                        content: "✅ ログを全て削除しました。".to_string(),
+                        is_user: false,
+                    });
+                    self.scroll_to_bottom();
+                }
+                Err(e) => {
+                    self.messages.push(ChatMessage {
+                        content: format!("❌ ログ削除に失敗しました: {}", e),
+                        is_user: false,
+                    });
+                    self.scroll_to_bottom();
+                }
+            }
+            self.input.clear();
+            self.cursor_position = 0;
+            self.input_mode = InputMode::Normal;
+            self.input_line_count = 1;
+            self.selected_files.clear();
+            self.history_index = None;
+            self.temp_input.clear();
+            return;
+        }
         
         // プロンプト履歴に追加（空でない場合）
         if !original_message.trim().is_empty() {
