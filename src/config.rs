@@ -1,13 +1,11 @@
-use serde::Deserialize;
-use std::fs;
 use anyhow::Result;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub llm: LlmConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub model: String,
     pub max_tokens: Option<u32>,
@@ -16,9 +14,21 @@ pub struct LlmConfig {
 }
 
 impl Config {
-    pub fn load(path: &str) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
-        Ok(config)
+    pub fn load() -> Result<Self> {
+        dotenv::dotenv().ok();
+
+        let model = std::env::var("MODEL")?;
+        let gemini_api_key = std::env::var("GEMINI_API_KEY")?;
+        let max_tokens = std::env::var("MAX_TOKENS").ok().and_then(|v| v.parse().ok());
+        let temperature = std::env::var("TEMPERATURE").ok().and_then(|v| v.parse().ok());
+
+        Ok(Config {
+            llm: LlmConfig {
+                model,
+                max_tokens,
+                temperature,
+                gemini_api_key,
+            },
+        })
     }
 }

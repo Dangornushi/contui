@@ -652,4 +652,47 @@ impl ChatApp {
             self.update_input_line_count();
         }
     }
+
+    /// LLM自動ループをチャット欄に進行状況を表示しながら実行する
+    pub async fn chat_loop_with_progress(&mut self, initial_message: &str) -> anyhow::Result<()> {
+        let mut message = initial_message.to_string();
+        let mut step = 1;
+        let sender = self.event_sender.clone();
+        loop {
+            let progress_msg = format!("🤖 Step {}: LLMに問い合わせ中...", step);
+            self.messages.push(ChatMessage {
+                content: progress_msg.clone(),
+                is_user: false,
+            });
+            let _ = sender.send(ChatEvent::AIResponse(progress_msg));
+
+            let prompt = format!(
+                "{}\n\n---\n次に何をすべきか、追加タスクがあるかを必ず明示してください。\n「完了」「終了」「何もする必要がない」などの場合は、その旨を明確に書いてください。",
+                message
+            );
+            let response = self.gemini_client.chat(&prompt).await?;
+            let response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response);
+            self.messages.push(ChatMessage {
+                content: response_msg.clone(),
+                is_user: false,
+            });
+            let _ = sender.send(ChatEvent::AIResponse(response_msg));
+
+            let lower = response.to_lowercase();
+            if lower.contains("完了") || lower.contains("終了") || lower.contains("何もする必要がない") || lower.contains("nothing to do") {
+                let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
+                self.messages.push(ChatMessage {
+                    content: finish_msg.clone(),
+                    is_user: false,
+                });
+                let _ = sender.send(ChatEvent::AIResponse(finish_msg));
+                break;
+            }
+            message = response;
+            step += 1;
+        }
+        Ok(())
+    }
+    
+    
 }

@@ -6,7 +6,6 @@ mod history;
 mod file_access;
 mod markdown;
 mod test_tui;
-mod todo;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
@@ -31,25 +30,20 @@ use history::HistoryManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 環境変数でテストモードを確認
-    if std::env::var("TEST_TUI").is_ok() {
-        println!("Running TUI test mode...");
-        if let Err(e) = test_tui::test_basic_tui() {
-            eprintln!("TUI test failed: {}", e);
-        }
-        return Ok(());
-    }
-    
-    // 最小限のアプリケーション
-    if std::env::var("TEST_KEY").is_ok() {
-        return test_key_input().await;
-    }
+    // LLMループCLIモード
+    // LLM_LOOP環境変数の状態を表示
+    use crossterm::style::Print;
+    use std::io::Write;
+    let mut ct_stdout = std::io::stdout();
+        println!("LLM自動ループCLIモードを開始します。初回プロンプトを入力してください：");
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
     
     println!("Starting contui application...");
     
     // 設定を読み込む
     println!("Loading configuration...");
-    let config = Config::load("token.toml")?;
+    let config = Config::load()?;
     println!("Configuration loaded successfully");
     
     // 履歴管理を初期化
@@ -67,6 +61,7 @@ async fn main() -> Result<()> {
     let mut app = ChatApp::new(gemini_client, history_manager);
     println!("Chat application created");
     
+
     // ターミナルをセットアップ
     println!("Setting up terminal...");
     enable_raw_mode()?;
@@ -76,6 +71,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     println!("Terminal setup complete");
 
+    app.chat_loop_with_progress(input.trim()).await?;
     let result = run_app(&mut terminal, &mut app).await;
 
     // ターミナルをクリーンアップ

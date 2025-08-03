@@ -808,3 +808,34 @@ chmod +x script.sh
         Ok(edited_files)
     }
 }
+
+impl GeminiClient {
+    /// LLMの返答→アクション実行→結果をLLMへ再送→LLMが次の指示を返すループ処理
+    /// `initial_message` から開始し、LLMが「完了」「終了」等を返すまで自動で繰り返す
+    pub async fn chat_loop(&self, initial_message: &str) -> anyhow::Result<()> {
+        let mut message = initial_message.to_string();
+        let mut step = 1;
+        loop {
+            // 毎回「次に何をすべきか」「追加タスクがあるか」を問うプロンプトを付与
+            let prompt = format!(
+                "{}\n\n---\n次に何をすべきか、追加タスクがあるかを必ず明示してください。\n「完了」「終了」「何もする必要がない」などの場合は、その旨を明確に書いてください。",
+                message
+            );
+            println!("========== LLM Step {} ==========", step);
+            let response = self.chat(&prompt).await?;
+            println!("LLM Response:\n{}\n", response);
+
+            // 終了判定（「完了」「終了」「何もする必要がない」などが含まれていればbreak）
+            let lower = response.to_lowercase();
+            if lower.contains("完了") || lower.contains("終了") || lower.contains("何もする必要がない") || lower.contains("nothing to do") {
+                println!("LLMが終了を指示したためループを終了します。");
+                break;
+            }
+
+            // 次の入力としてLLMの返答をそのまま使う
+            message = response;
+            step += 1;
+        }
+        Ok(())
+    }
+}
