@@ -12,10 +12,10 @@ use tokio::sync::mpsc;
 use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
 use crate::markdown::wrap_text;
+use crate::todo::TodoManager;
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
-use device_query::{DeviceQuery, DeviceState, Keycode};
 
 #[derive(Debug)]
 pub enum ChatEvent {
@@ -42,12 +42,13 @@ pub struct ChatApp {
     pub directory_contents: Vec<String>,
     pub selected_files: Vec<String>,
     pub input_line_count: usize,  // 入力フィールドの行数
-    pub device_state: DeviceState,  // リアルタイムキー状態監視
     pub input_history: Vec<String>,  // プロンプト履歴
     pub history_index: Option<usize>,  // 現在の履歴インデックス
     pub temp_input: String,  // 履歴ナビゲーション中の一時的な入力
     pub show_help: bool,  // ヘルプウィンドウ表示フラグ
     pub notification: Option<String>, // ファイル作成通知など一時的な表示
+    pub todo_manager: TodoManager,  // TODOリスト管理
+    pub show_todo: bool,  // TODOリスト表示フラグ
 }
 
 #[derive(Debug, PartialEq)]
@@ -57,6 +58,7 @@ pub enum InputMode {
     Visual,
     SessionList,
     FileBrowser,
+    TodoList,
 }
 
 #[derive(Debug)]
@@ -99,6 +101,11 @@ impl ChatApp {
             }
         }
         
+        let todo_manager = TodoManager::new().unwrap_or_else(|_| {
+            // TODOマネージャーの初期化に失敗した場合は空のマネージャーを作成
+            TodoManager { current_list: None, storage_path: "todo_state.json".to_string() }
+        });
+
         let mut app = Self {
             input: String::new(),
             cursor_position: 0,
@@ -118,18 +125,19 @@ impl ChatApp {
             directory_contents: Vec::new(),
             selected_files: Vec::new(),
             input_line_count: 1,  // 初期値は1行
-            device_state: DeviceState::new(),  // リアルタイムキー状態監視を初期化
             input_history: Vec::new(),  // プロンプト履歴を初期化
             history_index: None,  // 履歴インデックスを初期化
             temp_input: String::new(),  // 一時的な入力を初期化
             show_help: false,  // ヘルプウィンドウは初期状態では非表示
             notification: None, // ← 追加
+            todo_manager,
+            show_todo: false,
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
         if app.messages.is_empty() {
             app.messages.push(ChatMessage {
-                content: "Welcome to ConTUI! Press 'i' to start typing, 'q' to quit, 'n' for new session.\n\n📁 File operations:\n- Use @file:path to reference files\n- Ask me to create files (e.g., \"Create an empty file called test.txt\")\n- Press 'f' to browse files\n\n� Command execution:\n- Ask me to run commands (e.g., \"List files in current directory\")\n- I can execute shell commands for you\n\n�💡 Try asking:\n- \"Create an empty text file called example.txt\"\n- \"List files in current directory\"\n- \"Show git status\"".to_string(),
+                content: "Welcome to ConTUI! Press 'i' to start typing, 'q' to quit, 'n' for new session.\n\n📁 File operations:\n- Use @file:path to reference files\n- Ask me to create files (e.g., \"Create an empty file called test.txt\")\n- Press 'f' to browse files\n\n🔧 Command execution:\n- Ask me to run commands (e.g., \"List files in current directory\")\n- I can execute shell commands for you\n\n📋 TODO management:\n- TODOs are automatically shown in AI responses\n- Press 't' to toggle TODO panel, 'T' for TODO management\n\n💡 Try asking:\n- \"Create an empty text file called example.txt\"\n- \"List files in current directory\"\n- \"Help me build a simple web server\"".to_string(),
                 is_user: false,
             });
         }
@@ -152,6 +160,7 @@ impl ChatApp {
             InputMode::Visual => self.handle_visual_mode_key(key_event),
             InputMode::SessionList => self.handle_session_list_key(key_event),
             InputMode::FileBrowser => self.handle_file_browser_key(key_event),
+            InputMode::TodoList => self.handle_todo_list_key(key_event),
         }
     }
 
@@ -293,6 +302,17 @@ impl ChatApp {
                 self.file_browser_state.select(Some(0));
             }
             
+            // TODOリスト表示（右パネル）
+            KeyCode::Char('t') => {
+                self.show_todo = !self.show_todo;
+            }
+            
+            // TODOリスト管理
+            KeyCode::Char('T') => {
+                self.input_mode = InputMode::TodoList;
+            }
+            
+            
             // 選択されたメッセージを入力欄に挿入
             KeyCode::Char('y') => {
                 self.insert_selected_message();
@@ -318,26 +338,15 @@ impl ChatApp {
                 }
             }
             KeyCode::Enter => {
-                // device_queryを使ってリアルタイムでShiftキーの状態を確認
-                let keys = self.device_state.get_keys();
-                let shift_pressed = keys.contains(&Keycode::LShift) || keys.contains(&Keycode::RShift);
-                
-                // CRITICAL: device_queryでShiftが検出された場合は絶対に送信しない
-                if shift_pressed {
-                    self.insert_char('\n');
-                    self.update_input_line_count();
-                    return Ok(false);
-                }
-                
-                // クロスターム側でもShiftをチェック（二重保護）
+                // クロスターム側でShiftをチェック
                 if key_event.modifiers.contains(KeyModifiers::SHIFT) {
                     self.insert_char('\n');
                     self.update_input_line_count();
                     return Ok(false);
                 }
                 
-                // 修飾子が完全に空で、Shiftが押されていない場合のみ送信処理
-                if key_event.modifiers.is_empty() && !shift_pressed {
+                // 修飾子が完全に空の場合のみ送信処理
+                if key_event.modifiers.is_empty() {
                     if !self.input.trim().is_empty() {
                         self.send_message();
                     } else {
@@ -522,6 +531,36 @@ impl ChatApp {
             KeyCode::Char('i') => {
                 // 入力モードに切り替え
                 self.input_mode = InputMode::Insert;
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_todo_list_key(&mut self, key_event: crossterm::event::KeyEvent) -> Result<bool> {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('n') => {
+                // 新しいTODOリストを作成
+                self.create_new_todo_list();
+            }
+            KeyCode::Char('c') => {
+                // 現在のTODOリストをクリア
+                if let Err(e) = self.todo_manager.clear_current_list() {
+                    self.show_notification(&format!("Error clearing todo list: {}", e));
+                } else {
+                    self.show_notification("Todo list cleared");
+                }
+            }
+            KeyCode::Char('r') => {
+                // TODOリストを再読み込み
+                if let Err(e) = self.todo_manager.load() {
+                    self.show_notification(&format!("Error loading todo list: {}", e));
+                } else {
+                    self.show_notification("Todo list reloaded");
+                }
             }
             _ => {}
         }
@@ -765,6 +804,23 @@ impl ChatApp {
                 // ファイル作成要求を処理
                 let processed_msg = self.process_file_creation_requests(&msg);
                 
+                // TODOリストの自動更新を実行
+                let _updated_items = self.todo_manager.update_from_ai_response(&processed_msg).unwrap_or_default();
+
+                // 失敗したTODOアイテムがあるかチェックし、再帰的修正フローを実行
+                self.check_and_handle_failed_todos(&processed_msg);
+                
+                // AIレスポンスにTODO情報を追加
+                let final_msg = self.append_todo_summary_to_response(processed_msg.clone());
+                
+                // AIレスポンスをメッセージリストに追加
+                self.messages.push(ChatMessage {
+                    content: final_msg,
+                    is_user: false,
+                });
+                self.is_loading = false;
+                self.scroll_to_bottom();
+                
                 // 履歴管理にAIレスポンスを追加（処理後のメッセージ）
                 if let Err(_) = self.history_manager.get_history_mut().add_message(processed_msg.clone(), false) {
                     // エラーは無視
@@ -842,6 +898,16 @@ impl ChatApp {
             clean_message
         };
 
+        // TODOリストが存在しない場合、新しく作成するか確認
+        if self.todo_manager.current_list.is_none() && self.todo_manager.should_create_new_list(&message_to_send) {
+            if let Err(e) = self.todo_manager.create_new_list(
+                format!("タスク: {}", message_to_send.chars().take(30).collect::<String>()),
+                message_to_send.clone()
+            ) {
+                self.show_notification(&format!("Error creating todo list: {}", e));
+            }
+        }
+
         // 履歴管理にメッセージを追加
         if let Err(_) = self.history_manager.get_history_mut().add_message(message_to_send.clone(), true) {
             // エラーは無視
@@ -862,7 +928,13 @@ impl ChatApp {
         self.scroll_to_bottom();
 
         // 会話コンテキストを取得
-        let context = self.history_manager.get_conversation_context(10);
+        let mut context = self.history_manager.get_conversation_context(10);
+        
+        // TODOリストのコンテキストを追加
+        let todo_context = self.todo_manager.get_context_for_llm();
+        if !todo_context.is_empty() {
+            context.push(format!("\n## Current TODO List Context:\n{}", todo_context));
+        }
 
         // AIレスポンスを非同期で取得
         let sender = self.event_sender.clone();
@@ -1227,23 +1299,57 @@ impl ChatApp {
             self.render_session_list(f);
         } else if self.input_mode == InputMode::FileBrowser {
             self.render_file_browser(f);
+        } else if self.input_mode == InputMode::TodoList {
+            self.render_todo_list(f);
         } else {
             let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
             let notification_height = if self.notification.is_some() { 2 } else { 0 };
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(3),
-                    Constraint::Length(notification_height),
-                    Constraint::Length(input_height),
-                ])
-                .split(f.area());
+            
+            if self.show_todo && self.todo_manager.current_list.is_some() {
+                // TODOリストを表示する場合は横分割
+                let horizontal_chunks = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Percentage(70),
+                        Constraint::Percentage(30),
+                    ])
+                    .split(f.area());
 
-            self.render_messages(f, chunks[0]);
-            if let Some(ref note) = self.notification {
-                self.render_notification(f, chunks[1], note);
+                let main_chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(3),
+                        Constraint::Length(notification_height),
+                        Constraint::Length(input_height),
+                    ])
+                    .split(horizontal_chunks[0]);
+
+                self.render_messages(f, main_chunks[0]);
+                if let Some(ref note) = self.notification {
+                    self.render_notification(f, main_chunks[1], note);
+                }
+                self.render_input(f, main_chunks[2]);
+                
+                // TODOリストを右側に表示
+                self.render_todo_panel(f, horizontal_chunks[1]);
+            } else {
+                // 通常表示
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(3),
+                        Constraint::Length(notification_height),
+                        Constraint::Length(input_height),
+                    ])
+                    .split(f.area());
+
+                self.render_messages(f, chunks[0]);
+                if let Some(ref note) = self.notification {
+                    self.render_notification(f, chunks[1], note);
+                }
+                self.render_input(f, chunks[2]);
             }
-            self.render_input(f, chunks[2]);
+            
             if self.show_help {
                 self.render_floating_help(f);
             }
@@ -1324,6 +1430,7 @@ impl ChatApp {
             InputMode::Visual => Style::default().fg(Color::Magenta),
             InputMode::SessionList => Style::default().fg(Color::Cyan),
             InputMode::FileBrowser => Style::default().fg(Color::Cyan),
+            InputMode::TodoList => Style::default().fg(Color::Green),
         };
 
         let title = match self.input_mode {
@@ -1332,6 +1439,7 @@ impl ChatApp {
             InputMode::Visual => "Visual Mode (Select text, press 'd' to delete, 'y' to yank, Esc to exit)",
             InputMode::SessionList => "Session List (Press Enter to select, 'd' to delete, 'n' for new)",
             InputMode::FileBrowser => "File Browser (Press Enter to open, 'd' to delete, 'n' for new)",
+            InputMode::TodoList => "Todo List (Press 'n' for new, 'c' to clear, 'r' to reload, 'q' to exit)",
         };
 
         let input = Paragraph::new(self.input.as_str())
@@ -1433,6 +1541,9 @@ impl ChatApp {
             InputMode::FileBrowser => {
                 // ファイルブラウザモードではカーソル非表示
             }
+            InputMode::TodoList => {
+                // TODOリストモードではカーソル非表示
+            }
         }
     }
 
@@ -1493,6 +1604,8 @@ impl ChatApp {
                 "  s                   - Save history",
                 "  S                   - Session list",
                 "  f                   - File browser",
+                "  t                   - Toggle TODO panel",
+                "  T                   - TODO list management",
                 "  q                   - Quit",
                 "",
                 "Help:",
@@ -1575,6 +1688,20 @@ impl ChatApp {
                 "",
                 "Exit:",
                 "  q                   - Return to chat",
+                "",
+                "Help:",
+                "  Ctrl+H              - Toggle this help window",
+            ],
+            InputMode::TodoList => vec![
+                "=== Todo List Management ===",
+                "",
+                "Actions:",
+                "  n                   - Create new todo list",
+                "  c                   - Clear current todo list",
+                "  r                   - Reload todo list from file",
+                "",
+                "Exit:",
+                "  q or Esc            - Return to normal mode",
                 "",
                 "Help:",
                 "  Ctrl+H              - Toggle this help window",
@@ -1741,6 +1868,63 @@ impl ChatApp {
             )
             .style(Style::default().fg(Color::Gray));
         f.render_widget(help, chunks[3]);
+    }
+
+    fn render_todo_list(&mut self, f: &mut Frame) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+            ])
+            .split(f.area());
+
+        // TODOリストの内容を表示
+        let todo_content = if let Some(ref list) = self.todo_manager.current_list {
+            list.get_display_text()
+        } else {
+            "No active todo list.\nPress 'n' to create a new one.".to_string()
+        };
+
+        let todo_paragraph = Paragraph::new(todo_content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Todo List Management")
+                    .border_type(BorderType::Rounded),
+            )
+            .style(Style::default().fg(Color::White))
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        f.render_widget(todo_paragraph, chunks[0]);
+
+        // ヘルプテキストを表示
+        let help = Paragraph::new("n: New todo list | c: Clear | r: Reload | q/Esc: Back")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Help")
+                    .border_type(BorderType::Rounded)
+            )
+            .style(Style::default().fg(Color::Gray));
+
+        f.render_widget(help, chunks[1]);
+    }
+
+    fn render_todo_panel(&mut self, f: &mut Frame, area: Rect) {
+        if let Some(ref list) = self.todo_manager.current_list {
+            let todo_content = list.get_display_text();
+            
+            let todo_paragraph = Paragraph::new(todo_content)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("📋 TODO List")
+                        .border_type(BorderType::Rounded),
+                )
+                .style(Style::default().fg(Color::Green))
+                .wrap(ratatui::widgets::Wrap { trim: true });
+            f.render_widget(todo_paragraph, area);
+        }
     }
 
     fn truncate_string_safe(s: &str, max_chars: usize) -> String {
@@ -1940,5 +2124,132 @@ impl ChatApp {
                     .border_type(BorderType::Rounded),
             );
         f.render_widget(notification, area);
+    }
+
+    // TODOリスト関連のメソッド
+    fn create_new_todo_list(&mut self) {
+        // 簡単な例としてデフォルトのTODOリストを作成
+        if let Err(e) = self.todo_manager.create_new_list(
+            "新しいタスク".to_string(),
+            "ユーザーからの新しいリクエスト".to_string()
+        ) {
+            self.show_notification(&format!("Error creating todo list: {}", e));
+        } else {
+            self.show_notification("New todo list created");
+        }
+    }
+
+    fn show_notification(&mut self, message: &str) {
+        self.notification = Some(message.to_string());
+    }
+
+    /// 失敗したTODOアイテムをチェックし、再帰的修正フローを処理
+    fn check_and_handle_failed_todos(&mut self, ai_response: &str) {
+        // 自動修正可能なエラーがあるかチェック
+        if self.todo_manager.is_auto_correctable(ai_response) {
+            // 失敗したTODOアイテムを特定
+            if let Some(failed_item_id) = self.find_failed_todo_item() {
+                // 再帰的修正フローを実行
+                match self.todo_manager.handle_failed_todo_recursive(&failed_item_id, ai_response) {
+                    Ok(retry_message) => {
+                        self.show_notification("🔄 自動修正を試行中...");
+                        
+                        // 修正提案をLLMに自動送信
+                        if let Some(retry_context) = self.todo_manager.generate_retry_context(&failed_item_id) {
+                            self.send_retry_request_to_llm(retry_context);
+                        }
+                    }
+                    Err(e) => {
+                        self.show_notification(&format!("修正フロー失敗: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
+    /// 失敗したTODOアイテムのIDを検索
+    fn find_failed_todo_item(&self) -> Option<String> {
+        if let Some(ref list) = self.todo_manager.current_list {
+            for item_id in &list.order {
+                if let Some(item) = list.items.get(item_id) {
+                    if item.status == crate::todo::TodoStatus::Failed {
+                        return Some(item_id.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 修正提案をLLMに自動送信
+    fn send_retry_request_to_llm(&mut self, retry_context: String) {
+        // 会話コンテキストを取得
+        let mut context = self.history_manager.get_conversation_context(5);
+        
+        // TODOリストのコンテキストを追加
+        let todo_context = self.todo_manager.get_context_for_llm();
+        if !todo_context.is_empty() {
+            context.push(format!("\n## Current TODO List Context:\n{}", todo_context));
+        }
+        
+        // 修正提案コンテキストを追加
+        context.push(format!("\n## Retry Request:\n{}", retry_context));
+
+        // AIレスポンスを非同期で取得
+        let sender = self.event_sender.clone();
+        let client = self.gemini_client.clone();
+        let retry_message = "前回のタスクでエラーが発生しました。上記のエラー情報を参考に修正提案を行い、適切な解決方法を提供してください。".to_string();
+        
+        tokio::spawn(async move {
+            let result = client.chat_with_context(&retry_message, &context).await;
+
+            match result {
+                Ok(response) => {
+                    let _ = sender.send(ChatEvent::AIResponse(response));
+                }
+                Err(e) => {
+                    let _ = sender.send(ChatEvent::Error(e.to_string()));
+                }
+            }
+        });
+
+        // ローディング状態を設定
+        self.is_loading = true;
+        
+        // 自動修正リクエストメッセージを表示
+        self.messages.push(ChatMessage {
+            content: "🔄 自動修正リクエストを送信中...".to_string(),
+            is_user: false,
+        });
+        self.scroll_to_bottom();
+    }
+
+    /// AIレスポンスにTODO情報を追加
+    fn append_todo_summary_to_response(&self, response: String) -> String {
+        if let Some(ref list) = self.todo_manager.current_list {
+            let mut final_response = response;
+            
+            // 簡潔なTODO進捗情報を追加
+            let progress = list.get_progress_summary();
+            
+            // 現在のステップを取得
+            let current_step = if let Some(current_item) = list.get_next_pending_item() {
+                format!("現在: {}", current_item.title)
+            } else if list.is_completed() {
+                "✅ 全て完了".to_string()
+            } else {
+                "待機中".to_string()
+            };
+            
+            final_response.push_str(&format!(
+                "\n\n---\n📋 **TODO**: {} | {}",
+                progress,
+                current_step
+            ));
+            
+            final_response
+        } else {
+            response
+        }
     }
 }

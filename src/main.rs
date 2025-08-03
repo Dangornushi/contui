@@ -5,6 +5,7 @@ mod history;
 mod file_access;
 mod markdown;
 mod test_tui;
+mod todo;
 
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
