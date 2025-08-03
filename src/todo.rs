@@ -220,22 +220,18 @@ impl TodoManager {
     }
 
     pub fn create_new_list(&mut self, title: String, description: String) -> Result<String> {
-        let mut todo_list = TodoList::new(title, description);
-        
+        let mut todo_list = TodoList::new(title, description.clone());
         // プロジェクト内容に基づいてTODO項目を生成
         let todo_items = self.generate_project_specific_todos(&description);
-        
         for item in todo_items {
             todo_list.add_item(item);
         }
-        
         // 最初のアイテムを進行中に設定
         if let Some(first_item_id) = todo_list.order.first() {
             if let Some(first_item) = todo_list.items.get_mut(first_item_id) {
                 first_item.update_status(TodoStatus::InProgress);
             }
         }
-        
         let list_id = todo_list.id.clone();
         self.current_list = Some(todo_list);
         self.save()?;
