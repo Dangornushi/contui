@@ -1,6 +1,7 @@
+mod todo_manager;
 mod config;
 mod gemini;
-mod app;
+pub mod app;
 mod history;
 mod file_access;
 mod markdown;
@@ -23,7 +24,7 @@ use std::{
     time::Duration,
 };
 use anyhow::Result;
-use app::ChatApp;
+use app::{ChatApp, ChatEvent};
 use config::Config;
 use gemini::GeminiClient;
 use history::HistoryManager;
