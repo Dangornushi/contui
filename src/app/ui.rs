@@ -30,13 +30,13 @@ impl ChatApp {
         let _ = terminal.draw(|f| self.render(f));
     }
     pub fn render(&mut self, f: &mut Frame) {
-        if self.input_mode == InputMode::SessionList {
+        if self.ui.input_mode == InputMode::SessionList {
             self.render_session_list(f);
-        } else if self.input_mode == InputMode::FileBrowser {
+        } else if self.ui.input_mode == InputMode::FileBrowser {
             self.render_file_browser(f);
         } else {
-            let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
-            let notification_height = if self.notification.is_some() { 2 } else { 0 };
+            let input_height = (self.ui.input_line_count + 2).clamp(3, 10) as u16;
+            let notification_height = if self.ui.notification.is_some() { 2 } else { 0 };
             
             // 通常表示（TODOパネル分割は削除）
             let chunks = Layout::default()
@@ -49,69 +49,77 @@ impl ChatApp {
                 .split(f.area());
 
             self.render_messages(f, chunks[0]);
-            if let Some(ref note) = self.notification {
+            if let Some(ref note) = self.ui.notification {
                 self.render_notification(f, chunks[1], note);
             }
             self.render_input(f, chunks[2]);
             
-            if self.show_help {
+            if self.ui.show_help {
                 self.render_floating_help(f);
             }
         }
     }
 
     pub fn render_messages(&mut self, f: &mut Frame, area: Rect) {
-        let messages: Vec<ListItem> = self
-            .messages
+        // 1. メッセージ全体をラップして仮想行リストを作成
+        let mut virtual_lines: Vec<(String, Style)> = Vec::new();
+        let max_width = if area.width > 8 { area.width as usize - 8 } else { 1 };
+        for msg in &self.messages {
+            let style = if msg.is_user {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Blue)
+            };
+            let prefix = if msg.is_user { "You" } else { "AI" };
+            let content = format!("{}: {}", prefix, msg.content);
+            let wrapped = wrap_text(&content, max_width);
+            for line in wrapped.lines() {
+                virtual_lines.push((line.to_string(), style));
+            }
+        }
+
+        // 2. スクロールオフセットで表示範囲を決定
+        let total_lines = virtual_lines.len();
+        let height = area.height.saturating_sub(2) as usize; // 枠線分
+        if total_lines == 0 {
+            // 空の場合
+            let empty = ListItem::new(Text::from("No messages")).style(Style::default());
+            let messages_list = List::new(vec![empty])
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title("Chat History")
+                        .border_type(BorderType::Rounded),
+                );
+            f.render_widget(messages_list, area);
+            return;
+        }
+
+        // scroll_offsetは「仮想行リスト」の先頭行インデックス
+        // 範囲外なら補正
+        if self.ui.scroll_offset > total_lines.saturating_sub(1) {
+            self.ui.scroll_offset = total_lines.saturating_sub(1);
+        }
+        let start = self.ui.scroll_offset;
+        let end = (start + height).min(total_lines);
+
+        // 3. 表示するListItemを作成
+        let visible_lines: Vec<ListItem> = virtual_lines[start..end]
             .iter()
-            .enumerate()
-            .map(|(_i, msg)| {
-                let style = if msg.is_user {
-                    Style::default().fg(Color::Green)
-                } else {
-                    Style::default().fg(Color::Blue)
-                };
-                
-                let prefix = if msg.is_user { "You" } else { "AI" };
-                let content = format!(/* "{}: {{}}" */ "{}: {}", prefix, msg.content);
-                
-                // 幅から境界線とパディングを差し引いて計算（より保守的に）
-                let max_width = if area.width > 8 { 
-                    area.width as usize - 8 
-                } else { 
-                    1 
-                };
-                
-                // wrap_text関数を使用してテキストを改行
-                let wrapped_content = wrap_text(&content, max_width);
-                
-                ListItem::new(Text::from(wrapped_content)).style(style)
-            })
+            .map(|(line, style)| ListItem::new(Text::from(line.clone())).style(*style))
             .collect();
 
-        let messages_list = List::new(messages)
+        let messages_list = List::new(visible_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Chat History")
                     .border_type(BorderType::Rounded),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::BOLD))
-            .highlight_symbol(">> ");
+            );
 
-        f.render_stateful_widget(messages_list, area, &mut self.list_state);
+        f.render_widget(messages_list, area);
 
-        // スクロール位置を適切に調整
-        if !self.messages.is_empty() {
-            // 最下部にスクロールしていた場合、新しいメッセージが追加されても最下部に留まる
-            if self.scroll_offset >= self.messages.len().saturating_sub(1) {
-                self.scroll_offset = self.messages.len().saturating_sub(1);
-            }
-            
-            // 現在のスクロール位置でlist_stateを更新
-            self.list_state.select(Some(self.scroll_offset));
-        }
-
+        // ローディング表示
         if self.is_loading {
             let loading_area = Rect {
                 x: area.x + 2,
@@ -119,16 +127,14 @@ impl ChatApp {
                 width: area.width - 4,
                 height: 1,
             };
-            
             let loading_text = Paragraph::new("🤖 AI is thinking...")
                 .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC));
-            
             f.render_widget(loading_text, loading_area);
         }
     }
 
     pub fn render_input(&self, f: &mut Frame, area: Rect) {
-        let input_style = match self.input_mode {
+        let input_style = match self.ui.input_mode {
             InputMode::Normal => Style::default(),
             InputMode::Insert => Style::default().fg(Color::Yellow),
             InputMode::Visual => Style::default().fg(Color::Magenta),
@@ -137,7 +143,7 @@ impl ChatApp {
             // InputMode::TodoListは削除済み
         };
 
-        let title = match self.input_mode {
+        let title = match self.ui.input_mode {
             InputMode::Normal => "Input (Press 'i' to insert, 'v' for visual, 'q' to quit)",
             InputMode::Insert => "Insert Mode (Shift+Enter: new line, Enter: send, Esc: normal mode)",
             InputMode::Visual => "Visual Mode (Select text, press 'd' to delete, 'y' to yank, Esc to exit)",
@@ -146,7 +152,7 @@ impl ChatApp {
             // InputMode::TodoListは削除済み
         };
 
-        let input = Paragraph::new(self.input.as_str())
+        let input = Paragraph::new(self.ui.input.as_str())
             .style(input_style)
             .wrap(ratatui::widgets::Wrap { trim: false })
             .block(
@@ -163,7 +169,7 @@ impl ChatApp {
         let cursor_pos_x = area.x + cursor_column as u16 + 1;
         let cursor_pos_y = area.y + cursor_line as u16 + 1;
 
-        match self.input_mode {
+        match self.ui.input_mode {
             InputMode::Insert => {
                 // Insertモードでは棒線カーソル（デフォルト）
                 f.set_cursor_position((cursor_pos_x, cursor_pos_y));
@@ -173,9 +179,9 @@ impl ChatApp {
                 f.set_cursor_position((cursor_pos_x, cursor_pos_y));
                 
                 // 現在のカーソル位置の文字をハイライト表示
-                let graphemes: Vec<&str> = self.input.graphemes(true).collect();
-                if self.cursor_position < graphemes.len() {
-                    let char_at_cursor = graphemes[self.cursor_position];
+                let graphemes: Vec<&str> = self.ui.input.graphemes(true).collect();
+                if self.ui.cursor_position < graphemes.len() {
+                    let char_at_cursor = graphemes[self.ui.cursor_position];
                     let highlight_area = Rect {
                         x: cursor_pos_x,
                         y: cursor_pos_y,
@@ -185,7 +191,7 @@ impl ChatApp {
                     let highlight_text = Paragraph::new(char_at_cursor)
                         .style(Style::default().bg(Color::White).fg(Color::Black));
                     f.render_widget(highlight_text, highlight_area);
-                } else if self.input.is_empty() {
+                } else if self.ui.input.is_empty() {
                     // 空の場合は空白をハイライト
                     let highlight_area = Rect {
                         x: cursor_pos_x,
@@ -203,7 +209,7 @@ impl ChatApp {
                 f.set_cursor_position((cursor_pos_x, cursor_pos_y));
                 
                 if let Some((start_pos, end_pos)) = self.get_visual_selection_range() {
-                    let graphemes: Vec<&str> = self.input.graphemes(true).collect();
+                    let graphemes: Vec<&str> = self.ui.input.graphemes(true).collect();
                     let mut x_offset = 0;
                     
                     for (i, grapheme) in graphemes.iter().enumerate() {
@@ -279,7 +285,7 @@ impl ChatApp {
             popup_area,
         );
 
-        let help_text = match self.input_mode {
+        let help_text = match self.ui.input_mode {
             InputMode::Normal => vec![
                 "=== Normal Mode ===",
                 "",
@@ -455,7 +461,7 @@ impl ChatApp {
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol(">> ");
 
-        f.render_stateful_widget(session_list, chunks[0], &mut self.session_list_state);
+        f.render_stateful_widget(session_list, chunks[0], &mut self.ui.session_list_state);
 
         // ヘルプテキストを表示
         let help = Paragraph::new("Use j/k to navigate, Enter to select, d to delete, n for new session, q/Esc to go back")
@@ -482,23 +488,23 @@ impl ChatApp {
             .split(f.area());
 
         // タイトル
-        let title = Paragraph::new(format!("File Browser: {}", self.current_directory))
+        let title = Paragraph::new(format!("File Browser: {}", self.ui.current_directory))
             .style(Style::default().fg(Color::Yellow));
         f.render_widget(title, chunks[0]);
 
         // ディレクトリコンテンツ
-        let items: Vec<ListItem> = self.directory_contents
+        let items: Vec<ListItem> = self.ui.directory_contents
             .iter()
             .enumerate()
             .map(|(_i, item)| {
                 let style = if item.ends_with('/') {
                     Style::default().fg(Color::Blue)
                 } else {
-                    let mut path = std::path::PathBuf::from(&self.current_directory);
+                    let mut path = std::path::PathBuf::from(&self.ui.current_directory);
                     path.push(item);
                     let file_path = path.to_string_lossy().to_string();
-                    if self.selected_files.contains(&file_path) || 
-                       self.input.contains(&format!("@file:{}", file_path)) {
+                    if self.ui.selected_files.contains(&file_path) || 
+                       self.ui.input.contains(&format!("@file:{}", file_path)) {
                         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
@@ -523,13 +529,13 @@ impl ChatApp {
             )
             .highlight_symbol("➤ ");
 
-        f.render_stateful_widget(list, chunks[1], &mut self.file_browser_state);
+        f.render_stateful_widget(list, chunks[1], &mut self.ui.file_browser_state);
 
         // 現在の入力フィールドを表示
-        let input_text = if self.input.is_empty() {
+        let input_text = if self.ui.input.is_empty() {
             "Type your message here... (Use @file:path to reference files)".to_string()
         } else {
-            self.input.clone()
+            self.ui.input.clone()
         };
 
         let input_paragraph = Paragraph::new(input_text)

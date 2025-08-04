@@ -10,7 +10,7 @@ impl ChatApp {
     }
 
     pub fn show_notification(&mut self, message: &str) {
-        self.notification = Some(message.to_string());
+        self.ui.notification = Some(message.to_string());
     }
 
     pub fn check_and_handle_failed_todos(&mut self, ai_response: &str) {

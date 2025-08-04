@@ -4,18 +4,18 @@ impl ChatApp {
     pub fn session_list_next(&mut self) {
         let sessions = self.history_manager.get_history().get_session_list();
         if !sessions.is_empty() {
-            let i = match self.session_list_state.selected() {
+            let i = match self.ui.session_list_state.selected() {
                 Some(i) => (i + 1) % sessions.len(),
                 None => 0,
             };
-            self.session_list_state.select(Some(i));
+            self.ui.session_list_state.select(Some(i));
         }
     }
 
     pub fn session_list_previous(&mut self) {
         let sessions = self.history_manager.get_history().get_session_list();
         if !sessions.is_empty() {
-            let i = match self.session_list_state.selected() {
+            let i = match self.ui.session_list_state.selected() {
                 Some(i) => {
                     if i == 0 {
                         sessions.len() - 1
@@ -25,12 +25,12 @@ impl ChatApp {
                 }
                 None => 0,
             };
-            self.session_list_state.select(Some(i));
+            self.ui.session_list_state.select(Some(i));
         }
     }
 
     pub fn switch_to_selected_session(&mut self) {
-        if let Some(i) = self.session_list_state.selected() {
+        if let Some(i) = self.ui.session_list_state.selected() {
             let sessions = self.history_manager.get_history().get_session_list();
             if let Some(session) = sessions.get(i) {
                 let session_id = session.id;
@@ -50,14 +50,14 @@ impl ChatApp {
                     }
                 }
                 
-                self.input_mode = InputMode::Normal;
+                self.ui.input_mode = InputMode::Normal;
                 self.scroll_to_bottom();
             }
         }
     }
 
     pub fn delete_selected_session(&mut self) {
-        if let Some(i) = self.session_list_state.selected() {
+        if let Some(i) = self.ui.session_list_state.selected() {
             let sessions = self.history_manager.get_history().get_session_list();
             if let Some(session) = sessions.get(i) {
                 let session_id = session.id;
@@ -89,14 +89,14 @@ impl ChatApp {
                 // 選択位置を調整
                 let remaining_sessions = self.history_manager.get_history().get_session_list();
                 if remaining_sessions.is_empty() {
-                    self.session_list_state.select(None);
+                    self.ui.session_list_state.select(None);
                 } else {
                     let new_index = if i >= remaining_sessions.len() {
                         remaining_sessions.len() - 1
                     } else {
                         i
                     };
-                    self.session_list_state.select(Some(new_index));
+                    self.ui.session_list_state.select(Some(new_index));
                 }
             }
         }

@@ -26,32 +26,35 @@ pub enum ChatEvent {
     Error(String),
 }
 
-pub struct ChatApp {
+pub struct UiState {
     pub input: String,
-    pub cursor_position: usize,  // カーソルの位置（グラフィフィー単位）
-    pub visual_start: Option<usize>,  // Visual Modeの開始位置
-    pub messages: Vec<ChatMessage>,
+    pub cursor_position: usize,
+    pub visual_start: Option<usize>,
     pub input_mode: InputMode,
-    pub gemini_client: GeminiClient,
-    pub event_sender: mpsc::UnboundedSender<ChatEvent>,
-    pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
-    pub is_loading: bool,
     pub list_state: ListState,
     pub scroll_offset: usize,
-    pub history_manager: HistoryManager,
     pub session_list_state: ListState,
     pub file_browser_state: ListState,
     pub current_directory: String,
     pub directory_contents: Vec<String>,
     pub selected_files: Vec<String>,
-    pub input_line_count: usize,  // 入力フィールドの行数
-    pub input_history: Vec<String>,  // プロンプト履歴
-    pub history_index: Option<usize>,  // 現在の履歴インデックス
-    pub temp_input: String,  // 履歴ナビゲーション中の一時的な入力
-    pub show_help: bool,  // ヘルプウィンドウ表示フラグ
-    pub notification: Option<String>, // ファイル作成通知など一時的な表示
-    pub todo_manager: TodoManager,  // TODOリスト管理
-    // pub show_todo: bool,  // TODOリスト表示フラグ（不要なので削除）
+    pub input_line_count: usize,
+    pub input_history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub temp_input: String,
+    pub show_help: bool,
+    pub notification: Option<String>,
+}
+
+pub struct ChatApp {
+    pub ui: UiState,
+    pub messages: Vec<ChatMessage>,
+    pub gemini_client: GeminiClient,
+    pub event_sender: mpsc::UnboundedSender<ChatEvent>,
+    pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
+    pub is_loading: bool,
+    pub history_manager: HistoryManager,
+    pub todo_manager: TodoManager,
 }
 
 #[derive(Debug, PartialEq)]
@@ -110,31 +113,32 @@ impl ChatApp {
         });
 
         let mut app = Self {
-            input: String::new(),
-            cursor_position: 0,
-            visual_start: None,
+            ui: UiState {
+                input: String::new(),
+                cursor_position: 0,
+                visual_start: None,
+                input_mode: InputMode::Normal,
+                list_state: ListState::default(),
+                scroll_offset: 0,
+                session_list_state: ListState::default(),
+                file_browser_state: ListState::default(),
+                current_directory: current_dir,
+                directory_contents: Vec::new(),
+                selected_files: Vec::new(),
+                input_line_count: 1,
+                input_history: Vec::new(),
+                history_index: None,
+                temp_input: String::new(),
+                show_help: false,
+                notification: None,
+            },
             messages,
-            input_mode: InputMode::Normal,
             gemini_client,
             event_sender,
             event_receiver,
             is_loading: false,
-            list_state: ListState::default(),
-            scroll_offset: 0,
             history_manager,
-            session_list_state: ListState::default(),
-            file_browser_state: ListState::default(),
-            current_directory: current_dir,
-            directory_contents: Vec::new(),
-            selected_files: Vec::new(),
-            input_line_count: 1,  // 初期値は1行
-            input_history: Vec::new(),  // プロンプト履歴を初期化
-            history_index: None,  // 履歴インデックスを初期化
-            temp_input: String::new(),  // 一時的な入力を初期化
-            show_help: false,  // ヘルプウィンドウは初期状態では非表示
-            notification: None, // ← 追加
             todo_manager,
-            // show_todo: false, // 削除
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
@@ -196,8 +200,8 @@ impl ChatApp {
     }
 
     pub fn send_message(&mut self) {
-        self.notification = None;
-        let original_message = self.input.clone();
+        self.ui.notification = None;
+        let original_message = self.ui.input.clone();
 
         // /clearlogコマンド判定
         if original_message.trim() == "/clearlog" {
@@ -218,13 +222,13 @@ impl ChatApp {
                     self.scroll_to_bottom();
                 }
             }
-            self.input.clear();
-            self.cursor_position = 0;
-            self.input_mode = InputMode::Normal;
-            self.input_line_count = 1;
-            self.selected_files.clear();
-            self.history_index = None;
-            self.temp_input.clear();
+            self.ui.input.clear();
+            self.ui.cursor_position = 0;
+            self.ui.input_mode = InputMode::Normal;
+            self.ui.input_line_count = 1;
+            self.ui.selected_files.clear();
+            self.ui.history_index = None;
+            self.ui.temp_input.clear();
             return;
         }
         
@@ -233,15 +237,15 @@ impl ChatApp {
             self.add_to_input_history(original_message.clone());
         }
         
-        self.input.clear();
-        self.cursor_position = 0;
-        self.input_mode = InputMode::Normal;
+        self.ui.input.clear();
+        self.ui.cursor_position = 0;
+        self.ui.input_mode = InputMode::Normal;
         self.is_loading = true;
-        self.input_line_count = 1;  // 送信後は1行にリセット
+        self.ui.input_line_count = 1;  // 送信後は1行にリセット
         
         // 履歴ナビゲーションをリセット
-        self.history_index = None;
-        self.temp_input.clear();
+        self.ui.history_index = None;
+        self.ui.temp_input.clear();
 
         // ファイル参照を解析
         let (clean_message, file_paths) = self.parse_file_references(&original_message);
@@ -317,7 +321,7 @@ impl ChatApp {
         });
 
         // 選択されたファイルをクリア
-        self.selected_files.clear();
+        self.ui.selected_files.clear();
     }
 
     pub fn create_new_session(&mut self) {
@@ -340,34 +344,34 @@ impl ChatApp {
 
     pub fn scroll_to_bottom(&mut self) {
         if !self.messages.is_empty() {
-            self.scroll_offset = self.messages.len().saturating_sub(1);
-            self.list_state.select(Some(self.scroll_offset));
+            self.ui.scroll_offset = self.messages.len().saturating_sub(1);
+            self.ui.list_state.select(Some(self.ui.scroll_offset));
         }
     }
 
     // 選択されたメッセージを入力欄に挿入
     pub fn insert_selected_message(&mut self) {
-        if let Some(selected_index) = self.list_state.selected() {
+        if let Some(selected_index) = self.ui.list_state.selected() {
             if let Some(message) = self.messages.get(selected_index) {
                 // プレフィックス（"You: " または "AI: "）を除去して、メッセージ内容のみを取得
                 let content = message.content.clone();
                 
                 // 入力欄が空でない場合は、スペースまたは改行を追加
-                if !self.input.is_empty() {
-                    self.input.push('\n');
+                if !self.ui.input.is_empty() {
+                    self.ui.input.push('\n');
                 }
-                
+
                 // メッセージ内容を入力欄に追加
-                self.input.push_str(&content);
-                
+                self.ui.input.push_str(&content);
+
                 // カーソル位置を最後に移動
-                self.cursor_position = self.input.graphemes(true).count();
-                
+                self.ui.cursor_position = self.ui.input.graphemes(true).count();
+
                 // 入力行数を更新
                 self.update_input_line_count();
-                
+
                 // インサートモードに切り替え
-                self.input_mode = InputMode::Insert;
+                self.ui.input_mode = InputMode::Insert;
             }
         }
     }
@@ -405,7 +409,7 @@ impl ChatApp {
         
         // 選択されたファイルも追加
         let mut all_files = file_paths;
-        all_files.extend(self.selected_files.clone());
+        all_files.extend(self.ui.selected_files.clone());
         
         // 重複を削除
         all_files.sort();
@@ -464,7 +468,7 @@ impl ChatApp {
         if !files_created.is_empty() {
             self.refresh_directory_contents();
             let summary = format!("📁 ファイル作成: {}", files_created.join(", "));
-            self.notification = Some(summary);
+            self.ui.notification = Some(summary);
         }
         
         processed_response
@@ -550,9 +554,9 @@ impl ChatApp {
         let mut current_line = 0;
         let mut current_column = 0;
 
-        for (i, c) in self.input.graphemes(true).enumerate() {
-            if i == self.cursor_position {
-                current_column = UnicodeWidthStr::width(self.input.graphemes(true).take(i).collect::<String>().as_str());
+        for (i, c) in self.ui.input.graphemes(true).enumerate() {
+            if i == self.ui.cursor_position {
+                current_column = UnicodeWidthStr::width(self.ui.input.graphemes(true).take(i).collect::<String>().as_str());
                 break;
             }
             if c == "\n" {
@@ -561,9 +565,9 @@ impl ChatApp {
         }
         
         // カーソル位置が入力の最後にある場合
-        if self.cursor_position == self.input.graphemes(true).count() {
+        if self.ui.cursor_position == self.ui.input.graphemes(true).count() {
             let last_line_start_pos = self.get_line_start_position(current_line);
-            current_column = UnicodeWidthStr::width(self.input.graphemes(true).skip(last_line_start_pos).collect::<String>().as_str());
+            current_column = UnicodeWidthStr::width(self.ui.input.graphemes(true).skip(last_line_start_pos).collect::<String>().as_str());
         }
 
         (current_line, current_column)
@@ -571,29 +575,29 @@ impl ChatApp {
 
     // update_input_line_count は他の場所でも使う可能性があるのでここに残す
     pub fn update_input_line_count(&mut self) {
-        self.input_line_count = self.input.lines().count().max(1);
+        self.ui.input_line_count = self.ui.input.lines().count().max(1);
     }
 
     // add_to_input_history は他の場所でも使う可能性があるのでここに残す
     pub fn add_to_input_history(&mut self, message: String) {
         // 重複する最後の履歴は追加しない
-        if self.input_history.last().map_or(true, |last| last != &message) {
-            self.input_history.push(message);
+        if self.ui.input_history.last().map_or(true, |last| last != &message) {
+            self.ui.input_history.push(message);
         }
         // 履歴の最大数を制限（例: 50件）
-        if self.input_history.len() > 50 {
-            self.input_history.remove(0);
+        if self.ui.input_history.len() > 50 {
+            self.ui.input_history.remove(0);
         }
-        self.history_index = None; // 新しい入力があったら履歴ナビゲーションをリセット
+        self.ui.history_index = None; // 新しい入力があったら履歴ナビゲーションをリセット
     }
 
     // navigate_history_up は他の場所でも使う可能性があるのでここに残す
     pub fn navigate_history_up(&mut self) {
-        if self.input_history.is_empty() {
+        if self.ui.input_history.is_empty() {
             return;
         }
 
-        let new_index = match self.history_index {
+        let new_index = match self.ui.history_index {
             Some(idx) => {
                 if idx > 0 {
                     idx - 1
@@ -603,25 +607,25 @@ impl ChatApp {
             }
             None => {
                 // 履歴ナビゲーション開始時、現在の入力を一時保存
-                self.temp_input = self.input.clone();
-                self.input_history.len() - 1
+                self.ui.temp_input = self.ui.input.clone();
+                self.ui.input_history.len() - 1
             }
         };
-        self.history_index = Some(new_index);
-        self.input = self.input_history[new_index].clone();
-        self.cursor_position = self.input.graphemes(true).count();
+        self.ui.history_index = Some(new_index);
+        self.ui.input = self.ui.input_history[new_index].clone();
+        self.ui.cursor_position = self.ui.input.graphemes(true).count();
         self.update_input_line_count();
     }
 
     // navigate_history_down は他の場所でも使う可能性があるのでここに残す
     pub fn navigate_history_down(&mut self) {
-        if self.input_history.is_empty() {
+        if self.ui.input_history.is_empty() {
             return;
         }
 
-        let new_index = match self.history_index {
+        let new_index = match self.ui.history_index {
             Some(idx) => {
-                if idx < self.input_history.len() - 1 {
+                if idx < self.ui.input_history.len() - 1 {
                     idx + 1
                 } else {
                     // 履歴の最後に到達したら一時保存した入力に戻す
@@ -631,19 +635,19 @@ impl ChatApp {
             }
             None => return, // 履歴ナビゲーション中でない場合は何もしない
         };
-        self.history_index = Some(new_index);
-        self.input = self.input_history[new_index].clone();
-        self.cursor_position = self.input.graphemes(true).count();
+        self.ui.history_index = Some(new_index);
+        self.ui.input = self.ui.input_history[new_index].clone();
+        self.ui.cursor_position = self.ui.input.graphemes(true).count();
         self.update_input_line_count();
     }
 
     // reset_history_navigation は他の場所でも使う可能性があるのでここに残す
     pub fn reset_history_navigation(&mut self) {
-        if self.history_index.is_some() {
-            self.input = self.temp_input.clone();
-            self.temp_input.clear();
-            self.history_index = None;
-            self.cursor_position = self.input.graphemes(true).count();
+        if self.ui.history_index.is_some() {
+            self.ui.input = self.ui.temp_input.clone();
+            self.ui.temp_input.clear();
+            self.ui.history_index = None;
+            self.ui.cursor_position = self.ui.input.graphemes(true).count();
             self.update_input_line_count();
         }
     }

@@ -6,12 +6,12 @@ use unicode_segmentation::UnicodeSegmentation;
 
 impl ChatApp {
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<bool> {
-        self.notification = None;
+        self.ui.notification = None;
         if key_event.kind != KeyEventKind::Press {
             return Ok(false);
         }
 
-        match self.input_mode {
+        match self.ui.input_mode {
             InputMode::Normal => self.handle_normal_mode_key(key_event),
             InputMode::Insert => self.handle_insert_mode_key(key_event),
             InputMode::Visual => self.handle_visual_mode_key(key_event),
@@ -24,7 +24,7 @@ impl ChatApp {
     pub fn handle_normal_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
-            self.show_help = !self.show_help;
+            self.ui.show_help = !self.ui.show_help;
             return Ok(false);
         }
         
@@ -36,8 +36,8 @@ impl ChatApp {
             
             // セッション一覧
             KeyCode::Char('S') => {
-                self.input_mode = InputMode::SessionList;
-                self.session_list_state.select(Some(0));
+                self.ui.input_mode = InputMode::SessionList;
+                self.ui.session_list_state.select(Some(0));
             }
             
             // 新しいセッション
@@ -62,29 +62,29 @@ impl ChatApp {
             
             // インサートモード
             KeyCode::Char('i') => {
-                self.input_mode = InputMode::Insert;
+                self.ui.input_mode = InputMode::Insert;
             }
             KeyCode::Char('a') => {
-                self.input_mode = InputMode::Insert;
+                self.ui.input_mode = InputMode::Insert;
                 self.move_cursor_right();
             }
             KeyCode::Char('A') => {
-                self.input_mode = InputMode::Insert;
-                self.cursor_position = self.input.graphemes(true).count();
+                self.ui.input_mode = InputMode::Insert;
+                self.ui.cursor_position = self.ui.input.graphemes(true).count();
             }
             KeyCode::Char('I') => {
-                self.input_mode = InputMode::Insert;
-                self.cursor_position = 0;
+                self.ui.input_mode = InputMode::Insert;
+                self.ui.cursor_position = 0;
             }
             KeyCode::Char('o') => {
-                self.input_mode = InputMode::Insert;
-                self.input.push('\n');
-                self.cursor_position = self.input.graphemes(true).count();
+                self.ui.input_mode = InputMode::Insert;
+                self.ui.input.push('\n');
+                self.ui.cursor_position = self.ui.input.graphemes(true).count();
             }
             KeyCode::Char('O') => {
-                self.input_mode = InputMode::Insert;
-                self.input.insert(0, '\n');
-                self.cursor_position = 0;
+                self.ui.input_mode = InputMode::Insert;
+                self.ui.input.insert(0, '\n');
+                self.ui.cursor_position = 0;
             }
             
             // カーソル移動
@@ -95,9 +95,9 @@ impl ChatApp {
                 self.move_cursor_right();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.input.trim().is_empty() {
+                if self.ui.input.trim().is_empty() {
                     self.scroll_messages_down();
-                } else if self.input.lines().count() > 1 {
+                } else if self.ui.input.lines().count() > 1 {
                     self.move_cursor_down();
                 } else {
                     // 単一行の場合は履歴をナビゲート
@@ -105,9 +105,9 @@ impl ChatApp {
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.input.trim().is_empty() {
+                if self.ui.input.trim().is_empty() {
                     self.scroll_messages_up();
-                } else if self.input.lines().count() > 1 {
+                } else if self.ui.input.lines().count() > 1 {
                     self.move_cursor_up();
                 } else {
                     // 単一行の場合は履歴をナビゲート
@@ -115,16 +115,16 @@ impl ChatApp {
                 }
             }
             KeyCode::Char('0') => {
-                self.cursor_position = 0;
+                self.ui.cursor_position = 0;
             }
             KeyCode::Char('$') => {
-                self.cursor_position = self.input.graphemes(true).count();
+                self.ui.cursor_position = self.ui.input.graphemes(true).count();
             }
             
             // Visual Mode
             KeyCode::Char('v') => {
-                self.input_mode = InputMode::Visual;
-                self.visual_start = Some(self.cursor_position);
+                self.ui.input_mode = InputMode::Visual;
+                self.ui.visual_start = Some(self.ui.cursor_position);
             }
             
             // 削除
@@ -137,14 +137,14 @@ impl ChatApp {
             }
             KeyCode::Char('d') => {
                 // TODO: dd for delete line
-                self.input.clear();
-                self.cursor_position = 0;
-                self.input_line_count = 1;
+                self.ui.input.clear();
+                self.ui.cursor_position = 0;
+                self.ui.input_line_count = 1;
             }
             
             // 送信
             KeyCode::Enter => {
-                if !self.input.trim().is_empty() {
+                if !self.ui.input.trim().is_empty() {
                     self.send_message();
                 } else {
                     // 入力が空の場合、選択されたメッセージを入力欄に挿入
@@ -154,9 +154,9 @@ impl ChatApp {
             
             // ファイルブラウザ
             KeyCode::Char('f') => {
-                self.input_mode = InputMode::FileBrowser;
+                self.ui.input_mode = InputMode::FileBrowser;
                 self.refresh_directory_contents();
-                self.file_browser_state.select(Some(0));
+                self.ui.file_browser_state.select(Some(0));
             }
             
             // TODOリスト表示（右パネル）は廃止
@@ -183,15 +183,15 @@ impl ChatApp {
     pub fn handle_insert_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
-            self.show_help = !self.show_help;
+            self.ui.show_help = !self.ui.show_help;
             return Ok(false);
         }
         
         match key_event.code {
             KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                if self.cursor_position > 0 {
-                    self.cursor_position -= 1;
+                self.ui.input_mode = InputMode::Normal;
+                if self.ui.cursor_position > 0 {
+                    self.ui.cursor_position -= 1;
                 }
             }
             KeyCode::Enter => {
@@ -204,7 +204,7 @@ impl ChatApp {
                 
                 // 修飾子が完全に空の場合のみ送信処理
                 if key_event.modifiers.is_empty() {
-                    if !self.input.trim().is_empty() {
+                    if !self.ui.input.trim().is_empty() {
                         self.send_message();
                     } else {
                         // 空の入力の場合は何もしない（改行もしない）
@@ -235,7 +235,7 @@ impl ChatApp {
                 self.move_cursor_right();
             }
             KeyCode::Up => {
-                if self.input.lines().count() > 1 {
+                if self.ui.input.lines().count() > 1 {
                     self.move_cursor_up();
                 } else {
                     // 単一行の場合は履歴をナビゲート
@@ -243,7 +243,7 @@ impl ChatApp {
                 }
             }
             KeyCode::Down => {
-                if self.input.lines().count() > 1 {
+                if self.ui.input.lines().count() > 1 {
                     self.move_cursor_down();
                 } else {
                     // 単一行の場合は履歴をナビゲート
@@ -258,19 +258,19 @@ impl ChatApp {
     pub fn handle_visual_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
-            self.show_help = !self.show_help;
+            self.ui.show_help = !self.ui.show_help;
             return Ok(false);
         }
         
         match key_event.code {
             KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                self.visual_start = None;
+                self.ui.input_mode = InputMode::Normal;
+                self.ui.visual_start = None;
             }
             KeyCode::Char('v') => {
                 // Visual Modeを終了してNormalモードに戻る
-                self.input_mode = InputMode::Normal;
-                self.visual_start = None;
+                self.ui.input_mode = InputMode::Normal;
+                self.ui.visual_start = None;
             }
             
             // カーソル移動（選択範囲を拡張）
@@ -281,10 +281,10 @@ impl ChatApp {
                 self.move_cursor_right();
             }
             KeyCode::Char('0') => {
-                self.cursor_position = 0;
+                self.ui.cursor_position = 0;
             }
             KeyCode::Char('$') => {
-                self.cursor_position = self.input.graphemes(true).count();
+                self.ui.cursor_position = self.ui.input.graphemes(true).count();
             }
             KeyCode::Char('w') => {
                 // 次の単語の先頭へ
@@ -298,27 +298,27 @@ impl ChatApp {
             // 削除（選択範囲を削除）
             KeyCode::Char('d') | KeyCode::Char('x') => {
                 self.delete_visual_selection();
-                self.input_mode = InputMode::Normal;
-                self.visual_start = None;
+                self.ui.input_mode = InputMode::Normal;
+                self.ui.visual_start = None;
             }
             
             // ヤンク（選択範囲をコピー）
             KeyCode::Char('y') => {
                 // 今回は実装を簡略化してクリップボードに保存しない
-                self.input_mode = InputMode::Normal;
-                self.visual_start = None;
+                self.ui.input_mode = InputMode::Normal;
+                self.ui.visual_start = None;
             }
             
             // 上下移動（複数行の場合は行移動、そうでなければメッセージスクロール）
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.input.lines().count() > 1 {
+                if self.ui.input.lines().count() > 1 {
                     self.move_cursor_down();
                 } else {
                     self.scroll_messages_down();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                if self.input.lines().count() > 1 {
+                if self.ui.input.lines().count() > 1 {
                     self.move_cursor_up();
                 } else {
                     self.scroll_messages_up();
@@ -333,10 +333,10 @@ impl ChatApp {
     pub fn handle_session_list_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         match key_event.code {
             KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
+                self.ui.input_mode = InputMode::Normal;
             }
             KeyCode::Char('q') => {
-                self.input_mode = InputMode::Normal;
+                self.ui.input_mode = InputMode::Normal;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.session_list_previous();
@@ -351,7 +351,7 @@ impl ChatApp {
                 self.delete_selected_session();
             }
             KeyCode::Char('n') => {
-                self.input_mode = InputMode::Normal;
+                self.ui.input_mode = InputMode::Normal;
                 self.create_new_session();
             }
             _ => {}
@@ -362,7 +362,7 @@ impl ChatApp {
     pub fn handle_file_browser_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.input_mode = InputMode::Normal;
+                self.ui.input_mode = InputMode::Normal;
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.file_browser_previous();
@@ -387,7 +387,7 @@ impl ChatApp {
             }
             KeyCode::Char('i') => {
                 // 入力モードに切り替え
-                self.input_mode = InputMode::Insert;
+                self.ui.input_mode = InputMode::Insert;
             }
             _ => {}
         }
