@@ -10,12 +10,6 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crossterm::{
-    execute,
-    terminal::{Clear, ClearType},
-};
-use std::io::stdout;
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::app::{ChatApp, InputMode, ChatMessage};
@@ -561,10 +555,6 @@ impl ChatApp {
         f.render_widget(help, chunks[3]);
     }
 
-    // render_todo_listは不要になったため削除
-
-    // render_todo_panelは不要になったため削除
-
     pub fn render_notification(&self, f: &mut Frame, area: Rect, note: &str) {
         let notification_paragraph = Paragraph::new(note)
             .block(
@@ -575,14 +565,5 @@ impl ChatApp {
             )
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(notification_paragraph, area);
-use crossterm::{
-    execute,
-    terminal::{Clear, ClearType},
-};
-use std::io::stdout;
-use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
-
-}
-
+    }
 }

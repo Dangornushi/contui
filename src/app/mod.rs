@@ -1,15 +1,9 @@
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::Text,
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
-    Frame,
+    widgets::{ListState},
 };
 use tokio::sync::mpsc;
 use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
-use crate::markdown::wrap_text;
 use crate::todo_manager::TodoManager;
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
