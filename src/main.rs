@@ -27,6 +27,7 @@ use app::{ChatApp, ChatEvent};
 use config::Config;
 use gemini::GeminiClient;
 use history::HistoryManager;
+use app::terminal_util::{setup_terminal, cleanup_terminal};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -64,24 +65,14 @@ async fn main() -> Result<()> {
 
     // ターミナルをセットアップ
     println!("Setting up terminal...");
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = setup_terminal()?;
     println!("Terminal setup complete");
 
-    app.chat_loop_with_progress(input.trim()).await?;
+    app.chat_loop_with_progress(input.trim(), &mut terminal).await?;
     let result = run_app(&mut terminal, &mut app).await;
 
     // ターミナルをクリーンアップ
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    cleanup_terminal(&mut terminal)?;
 
     if let Err(err) = result {
         eprintln!("Error: {}", err);
@@ -116,20 +107,23 @@ async fn run_app<B: ratatui::backend::Backend>(
 
         // チャットイベントを処理
         while let Ok(chat_event) = app.event_receiver.try_recv() {
-            app.handle_chat_event(chat_event);
+            match chat_event {
+                ChatEvent::AIResponse(msg) => {
+                    app.push_ai_progress_message(msg, terminal);
+                    // 再描画（次ループで再描画されるが即時反映したい場合はここでも呼ぶ）
+                    terminal.draw(|f| app.render(f))?;
+                }
+                _ => {
+                    app.handle_chat_event(chat_event);
+                }
+            }
         }
     }
 }
 
 async fn test_key_input() -> Result<()> {
     println!("Starting key input test...");
-    
-    // ターミナルをセットアップ
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = setup_terminal()?;
     println!("Terminal setup complete for key test");
 
     loop {
@@ -165,14 +159,7 @@ async fn test_key_input() -> Result<()> {
         }
     }
 
-    // クリーンアップ
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    cleanup_terminal(&mut terminal)?;
 
     println!("Key test completed successfully");
     Ok(())

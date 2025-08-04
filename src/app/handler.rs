@@ -17,7 +17,7 @@ impl ChatApp {
             InputMode::Visual => self.handle_visual_mode_key(key_event),
             InputMode::SessionList => self.handle_session_list_key(key_event),
             InputMode::FileBrowser => self.handle_file_browser_key(key_event),
-            InputMode::TodoList => self.handle_todo_list_key(key_event),
+            // InputMode::TodoListは削除
         }
     }
 
@@ -159,14 +159,14 @@ impl ChatApp {
                 self.file_browser_state.select(Some(0));
             }
             
-            // TODOリスト表示（右パネル）
+            // TODOリスト表示（右パネル）は廃止
             KeyCode::Char('t') => {
-                self.show_todo = !self.show_todo;
+                // 何もしない
             }
             
-            // TODOリスト管理
+            // TODOリスト管理（TodoListモードは削除）
             KeyCode::Char('T') => {
-                self.input_mode = InputMode::TodoList;
+                // 何もしない
             }
             
             
@@ -394,33 +394,5 @@ impl ChatApp {
         Ok(false)
     }
 
-    pub fn handle_todo_list_key(&mut self, key_event: KeyEvent) -> Result<bool> {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.input_mode = InputMode::Normal;
-            }
-            KeyCode::Char('n') => {
-                // 新しいTODOリストを作成
-                self.create_new_todo_list();
-            }
-            KeyCode::Char('c') => {
-                // 現在のTODOリストをクリア
-                if let Err(e) = self.todo_manager.clear_current_list() {
-                    self.show_notification(&format!("Error clearing todo list: {}", e));
-                } else {
-                    self.show_notification("Todo list cleared");
-                }
-            }
-            KeyCode::Char('r') => {
-                // TODOリストを再読み込み
-                if let Err(e) = self.todo_manager.load() {
-                    self.show_notification(&format!("Error loading todo list: {}", e));
-                } else {
-                    self.show_notification("Todo list reloaded");
-                }
-            }
-            _ => {}
-        }
-        Ok(false)
-    }
+    // handle_todo_list_keyは不要になったため削除
 }

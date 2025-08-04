@@ -13,15 +13,11 @@ use ratatui::{
 };
 use std::{io::stdout, time::Duration};
 
+use crate::app::terminal_util::{setup_terminal, cleanup_terminal};
+
 pub fn test_basic_tui() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting basic TUI test...");
-    
-    // ターミナルをセットアップ
-    enable_raw_mode()?;
-    let mut stdout = stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let mut terminal = setup_terminal()?;
     println!("Terminal setup complete for test");
 
     let mut counter = 0;
@@ -56,13 +52,7 @@ pub fn test_basic_tui() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // クリーンアップ
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    cleanup_terminal(&mut terminal)?;
 
     println!("TUI test completed successfully");
     Ok(())

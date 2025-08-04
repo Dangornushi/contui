@@ -24,6 +24,7 @@ pub mod session_management;
 pub mod cursor_movement;
 pub mod todo_management;
 pub mod visual_mode;
+pub mod terminal_util;
 
 #[derive(Debug)]
 pub enum ChatEvent {
@@ -56,7 +57,7 @@ pub struct ChatApp {
     pub show_help: bool,  // ヘルプウィンドウ表示フラグ
     pub notification: Option<String>, // ファイル作成通知など一時的な表示
     pub todo_manager: TodoManager,  // TODOリスト管理
-    pub show_todo: bool,  // TODOリスト表示フラグ
+    // pub show_todo: bool,  // TODOリスト表示フラグ（不要なので削除）
 }
 
 #[derive(Debug, PartialEq)]
@@ -66,7 +67,7 @@ pub enum InputMode {
     Visual,
     SessionList,
     FileBrowser,
-    TodoList,
+    // TodoList, // 削除
 }
 
 #[derive(Debug)]
@@ -139,7 +140,7 @@ impl ChatApp {
             show_help: false,  // ヘルプウィンドウは初期状態では非表示
             notification: None, // ← 追加
             todo_manager,
-            show_todo: false,
+            // show_todo: false, // 削除
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
@@ -654,16 +655,17 @@ impl ChatApp {
     }
 
     /// LLM自動ループをチャット欄に進行状況を表示しながら実行する
-    pub async fn chat_loop_with_progress(&mut self, initial_message: &str) -> anyhow::Result<()> {
+    pub async fn chat_loop_with_progress(
+        &mut self,
+        initial_message: &str,
+        terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
+    ) -> anyhow::Result<()> {
         let mut message = initial_message.to_string();
         let mut step = 1;
         let sender = self.event_sender.clone();
         loop {
             let progress_msg = format!("🤖 Step {}: LLMに問い合わせ中...", step);
-            self.messages.push(ChatMessage {
-                content: progress_msg.clone(),
-                is_user: false,
-            });
+            self.push_ai_progress_message(progress_msg.clone(), terminal);
             let _ = sender.send(ChatEvent::AIResponse(progress_msg));
 
             let prompt = format!(
@@ -672,19 +674,13 @@ impl ChatApp {
             );
             let response = self.gemini_client.chat(&prompt).await?;
             let response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response);
-            self.messages.push(ChatMessage {
-                content: response_msg.clone(),
-                is_user: false,
-            });
+            self.push_ai_progress_message(response_msg.clone(), terminal);
             let _ = sender.send(ChatEvent::AIResponse(response_msg));
 
             let lower = response.to_lowercase();
             if lower.contains("完了") || lower.contains("終了") || lower.contains("何もする必要がない") || lower.contains("nothing to do") {
                 let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
-                self.messages.push(ChatMessage {
-                    content: finish_msg.clone(),
-                    is_user: false,
-                });
+                self.push_ai_progress_message(finish_msg.clone(), terminal);
                 let _ = sender.send(ChatEvent::AIResponse(finish_msg));
                 break;
             }

@@ -2,7 +2,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Text},
-    widgets::{ 
+    widgets::{
         Block, BorderType, Borders, List, ListItem, Paragraph,
     },
     Frame,
@@ -10,65 +10,55 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::{ChatApp, InputMode};
+use crossterm::{
+    execute,
+    terminal::{Clear, ClearType},
+};
+use std::io::stdout;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+
+use crate::app::{ChatApp, InputMode, ChatMessage};
 use crate::markdown::wrap_text;
 
 impl ChatApp {
+    /// AI進行状態メッセージを逐次追加し即時描画する
+    pub fn push_ai_progress_message<B: ratatui::backend::Backend>(
+        &mut self,
+        msg: String,
+        terminal: &mut Terminal<B>,
+    ) {
+        self.messages.push(ChatMessage {
+            is_user: false,
+            content: msg,
+        });
+        // 再描画（run_appから呼ばれる場合のみ即時反映）
+        let _ = terminal.draw(|f| self.render(f));
+    }
     pub fn render(&mut self, f: &mut Frame) {
         if self.input_mode == InputMode::SessionList {
             self.render_session_list(f);
         } else if self.input_mode == InputMode::FileBrowser {
             self.render_file_browser(f);
-        } else if self.input_mode == InputMode::TodoList {
-            self.render_todo_list(f);
         } else {
             let input_height = (self.input_line_count + 2).clamp(3, 10) as u16;
             let notification_height = if self.notification.is_some() { 2 } else { 0 };
             
-            if self.show_todo && self.todo_manager.current_list.is_some() {
-                // TODOリストを表示する場合は横分割
-                let horizontal_chunks = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([
-                        Constraint::Percentage(70),
-                        Constraint::Percentage(30),
-                    ])
-                    .split(f.area());
+            // 通常表示（TODOパネル分割は削除）
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),
+                    Constraint::Length(notification_height),
+                    Constraint::Length(input_height),
+                ])
+                .split(f.area());
 
-                let main_chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(3),
-                        Constraint::Length(notification_height),
-                        Constraint::Length(input_height),
-                    ])
-                    .split(horizontal_chunks[0]);
-
-                self.render_messages(f, main_chunks[0]);
-                if let Some(ref note) = self.notification {
-                    self.render_notification(f, main_chunks[1], note);
-                }
-                self.render_input(f, main_chunks[2]);
-                
-                // TODOリストを右側に表示
-                self.render_todo_panel(f, horizontal_chunks[1]);
-            } else {
-                // 通常表示
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Min(3),
-                        Constraint::Length(notification_height),
-                        Constraint::Length(input_height),
-                    ])
-                    .split(f.area());
-
-                self.render_messages(f, chunks[0]);
-                if let Some(ref note) = self.notification {
-                    self.render_notification(f, chunks[1], note);
-                }
-                self.render_input(f, chunks[2]);
+            self.render_messages(f, chunks[0]);
+            if let Some(ref note) = self.notification {
+                self.render_notification(f, chunks[1], note);
             }
+            self.render_input(f, chunks[2]);
             
             if self.show_help {
                 self.render_floating_help(f);
@@ -150,7 +140,7 @@ impl ChatApp {
             InputMode::Visual => Style::default().fg(Color::Magenta),
             InputMode::SessionList => Style::default().fg(Color::Cyan),
             InputMode::FileBrowser => Style::default().fg(Color::Cyan),
-            InputMode::TodoList => Style::default().fg(Color::Green),
+            // InputMode::TodoListは削除済み
         };
 
         let title = match self.input_mode {
@@ -159,7 +149,7 @@ impl ChatApp {
             InputMode::Visual => "Visual Mode (Select text, press 'd' to delete, 'y' to yank, Esc to exit)",
             InputMode::SessionList => "Session List (Press Enter to select, 'd' to delete, 'n' for new)",
             InputMode::FileBrowser => "File Browser (Press Enter to open, 'd' to delete, 'n' for new)",
-            InputMode::TodoList => "Todo List (Press 'n' for new, 'c' to clear, 'r' to reload, 'q' to exit)",
+            // InputMode::TodoListは削除済み
         };
 
         let input = Paragraph::new(self.input.as_str())
@@ -261,9 +251,7 @@ impl ChatApp {
             InputMode::FileBrowser => {
                 // ファイルブラウザモードではカーソル非表示
             }
-            InputMode::TodoList => {
-                // TODOリストモードではカーソル非表示
-            }
+            // InputMode::TodoListは削除済み
         }
     }
 
@@ -412,20 +400,7 @@ impl ChatApp {
                 "Help:",
                 "  Ctrl+H              - Toggle this help window",
             ],
-            InputMode::TodoList => vec![
-                "=== Todo List Management ===",
-                "",
-                "Actions:",
-                "  n                   - Create new todo list",
-                "  c                   - Clear current todo list",
-                "  r                   - Reload todo list from file",
-                "",
-                "Exit:",
-                "  q or Esc            - Return to normal mode",
-                "",
-                "Help:",
-                "  Ctrl+H              - Toggle this help window",
-            ],
+            // InputMode::TodoListは削除済み
         };
 
         // ヘルプテキストを上から重ねてレンダリング
@@ -586,68 +561,9 @@ impl ChatApp {
         f.render_widget(help, chunks[3]);
     }
 
-    pub fn render_todo_list(&mut self, f: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(3),
-            ])
-            .split(f.area());
+    // render_todo_listは不要になったため削除
 
-        // TODOリストの内容を表示
-        let todo_content = if let Some(ref list) = self.todo_manager.current_list {
-            let mut s = format!("# {}\n{}\n", list.title, list.description);
-            for (i, item) in list.items.iter().enumerate() {
-                s.push_str(&format!("{}. [{}] {}\n", i+1, if item.completed {"x"} else {" "}, item.title));
-            }
-            s
-        } else {
-            "No active todo list.\nPress 'n' to create a new one.".to_string()
-        };
-
-        let todo_paragraph = Paragraph::new(todo_content)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Todo List Management")
-                    .border_type(BorderType::Rounded),
-            )
-            .style(Style::default().fg(Color::White))
-            .wrap(ratatui::widgets::Wrap { trim: true });
-        f.render_widget(todo_paragraph, chunks[0]);
-
-        // ヘルプテキストを表示
-        let help = Paragraph::new("n: New todo list | c: Clear | r: Reload | q/Esc: Back")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Help")
-                    .border_type(BorderType::Rounded)
-            )
-            .style(Style::default().fg(Color::Gray));
-
-        f.render_widget(help, chunks[1]);
-    }
-
-    pub fn render_todo_panel(&mut self, f: &mut Frame, area: Rect) {
-        if let Some(ref list) = self.todo_manager.current_list {
-            let mut s = format!("# {}\n{}\n", list.title, list.description);
-            for (i, item) in list.items.iter().enumerate() {
-                s.push_str(&format!("{}. [{}] {}\n", i+1, if item.completed {"x"} else {" "}, item.title));
-            }
-            let todo_paragraph = Paragraph::new(s)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("📋 TODO List")
-                        .border_type(BorderType::Rounded),
-                )
-                .style(Style::default().fg(Color::Green))
-                .wrap(ratatui::widgets::Wrap { trim: true });
-            f.render_widget(todo_paragraph, area);
-        }
-    }
+    // render_todo_panelは不要になったため削除
 
     pub fn render_notification(&self, f: &mut Frame, area: Rect, note: &str) {
         let notification_paragraph = Paragraph::new(note)
@@ -659,5 +575,14 @@ impl ChatApp {
             )
             .style(Style::default().fg(Color::Cyan));
         f.render_widget(notification_paragraph, area);
-    }
+use crossterm::{
+    execute,
+    terminal::{Clear, ClearType},
+};
+use std::io::stdout;
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+
+}
+
 }
