@@ -227,7 +227,8 @@ chmod +x script.sh
 注意：同じファイル名が既に存在する場合、システムが自動的にユニークな名前で作成します（例：file.txt → file_1.txt）。
 
 ---
-【重要】全ての返答の末尾に is_finished: true または is_finished: false を必ず明示してください（JSON形式または "is_finished: true" のような形式でOK）。
+【重要】全ての返答の末尾に, タスクが終了したかを示すフラグである is_finished: true または is_finished: false を必ず明示してください（JSON形式または "is_finished: true" のような形式でOK）。
+また、is_finished:falseの際は、作業を完了させるためツールを実行すること。適切なツールが存在しない、また異常終終了しているなどの場合はtrueを返すこと。
 "#.to_string()
     }
 
@@ -789,7 +790,7 @@ impl GeminiClient {
             println!("LLM Response:\n{}\n", response);
 
             // is_finishedフラグで終了判定
-            if Self::extract_is_finished_flag(&response) == Some(true) {
+            if self.extract_is_finished_flag(&response) == Some(true) {
                 println!("LLMがis_finished: trueを返したためループを終了します。");
                 break;
             }
@@ -802,7 +803,7 @@ impl GeminiClient {
     }
 
     /// レスポンステキストから is_finished: true/false を抽出
-    fn extract_is_finished_flag(text: &str) -> Option<bool> {
+    pub fn extract_is_finished_flag(&self, text: &str) -> Option<bool> {
         // 例: {"is_finished": true} または is_finished: true
         let re = regex::Regex::new(r#""?is_finished"?\s*:\s*(true|false)"#).ok()?;
         if let Some(caps) = re.captures(text) {

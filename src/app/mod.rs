@@ -3,7 +3,7 @@ use ratatui::{
     widgets::ListState, Terminal,
 };
 use tokio::sync::mpsc;
-use crate::gemini::GeminiClient;
+use crate::gemini::{self, GeminiClient};
 use crate::history::HistoryManager;
 use crate::todo_manager::TodoManager;
 use anyhow::Result;
@@ -396,7 +396,7 @@ impl ChatApp {
                     let response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response);
                     let _ = sender.send(ChatEvent::AIResponse(response_msg));
                     let lower = response.to_lowercase();
-                    if lower.contains("完了") || lower.contains("終了") || lower.contains("何もする必要がない") || lower.contains("nothing to do") {
+                    if gemini_client.extract_is_finished_flag(&lower).unwrap_or(false) {
                         let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
                         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
                         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {

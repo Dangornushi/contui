@@ -38,7 +38,7 @@ impl ChatApp {
                     // エラーは無視
                     return;
                 }
-                
+                let _ = self.save_history();
                 // メッセージを再読み込み
                 self.messages.clear();
                 if let Some(session) = self.history_manager.get_history().get_current_session() {
@@ -49,7 +49,14 @@ impl ChatApp {
                         });
                     }
                 }
-                
+                // 履歴が空の場合のみWelcomeを追加
+                if self.messages.is_empty() {
+                    self.messages.push(ChatMessage {
+                        content: "Welcome to ConTUI!".to_string(),
+                        is_user: false,
+                    });
+                }
+                // セッション切替時は保存しない（ここで保存すると空で上書きされるバグ防止）
                 self.ui.input_mode = InputMode::Normal;
                 self.scroll_to_bottom(20);
             }
@@ -67,7 +74,7 @@ impl ChatApp {
                     // エラーは無視
                     return;
                 }
-                
+                let _ = self.save_history();
                 // 現在のセッションが削除された場合、新しいセッションを作成
                 if self.history_manager.get_history().current_session_id.is_none() {
                     self.create_new_session();
