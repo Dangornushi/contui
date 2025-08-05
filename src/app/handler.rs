@@ -5,23 +5,23 @@ use crate::app::{ChatApp, InputMode, ChatMessage};
 use unicode_segmentation::UnicodeSegmentation;
 
 impl ChatApp {
-    pub fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_key_event(&mut self, key_event: KeyEvent, terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>) -> Result<bool> {
         self.ui.notification = None;
         if key_event.kind != KeyEventKind::Press {
             return Ok(false);
         }
 
         match self.ui.input_mode {
-            InputMode::Normal => self.handle_normal_mode_key(key_event),
-            InputMode::Insert => self.handle_insert_mode_key(key_event),
-            InputMode::Visual => self.handle_visual_mode_key(key_event),
-            InputMode::SessionList => self.handle_session_list_key(key_event),
-            InputMode::FileBrowser => self.handle_file_browser_key(key_event),
+            InputMode::Normal => self.handle_normal_mode_key(key_event, terminal).await,
+            InputMode::Insert => self.handle_insert_mode_key(key_event, terminal).await,
+            InputMode::Visual => self.handle_visual_mode_key(key_event).await,
+            InputMode::SessionList => self.handle_session_list_key(key_event).await,
+            InputMode::FileBrowser => self.handle_file_browser_key(key_event).await,
             // InputMode::TodoListは削除
         }
     }
 
-    pub fn handle_normal_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_normal_mode_key(&mut self, key_event: KeyEvent, terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
             self.ui.show_help = !self.ui.show_help;
@@ -95,14 +95,7 @@ impl ChatApp {
                 self.move_cursor_right();
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.ui.input.trim().is_empty() {
-                    self.scroll_messages_down();
-                } else if self.ui.input.lines().count() > 1 {
-                    self.move_cursor_down();
-                } else {
-                    // 単一行の場合は履歴をナビゲート
-                    self.navigate_history_down();
-                }
+                self.scroll_messages_down();
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if self.ui.input.trim().is_empty() {
@@ -145,7 +138,7 @@ impl ChatApp {
             // 送信
             KeyCode::Enter => {
                 if !self.ui.input.trim().is_empty() {
-                    self.send_message();
+                    self.send_message(terminal).await;
                 } else {
                     // 入力が空の場合、選択されたメッセージを入力欄に挿入
                     self.insert_selected_message();
@@ -159,17 +152,6 @@ impl ChatApp {
                 self.ui.file_browser_state.select(Some(0));
             }
             
-            // TODOリスト表示（右パネル）は廃止
-            KeyCode::Char('t') => {
-                // 何もしない
-            }
-            
-            // TODOリスト管理（TodoListモードは削除）
-            KeyCode::Char('T') => {
-                // 何もしない
-            }
-            
-            
             // 選択されたメッセージを入力欄に挿入
             KeyCode::Char('y') => {
                 self.insert_selected_message();
@@ -180,7 +162,7 @@ impl ChatApp {
         Ok(false)
     }
 
-    pub fn handle_insert_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_insert_mode_key(&mut self, key_event: KeyEvent, terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
             self.ui.show_help = !self.ui.show_help;
@@ -205,7 +187,9 @@ impl ChatApp {
                 // 修飾子が完全に空の場合のみ送信処理
                 if key_event.modifiers.is_empty() {
                     if !self.ui.input.trim().is_empty() {
-                        self.send_message();
+                        self.send_message(terminal).await;
+                        // 送信後にUIを即時再描画
+                        terminal.draw(|f| self.render(f))?;
                     } else {
                         // 空の入力の場合は何もしない（改行もしない）
                     }
@@ -255,7 +239,7 @@ impl ChatApp {
         Ok(false)
     }
 
-    pub fn handle_visual_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_visual_mode_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         // Ctrl+H でヘルプ表示を切り替え
         if key_event.modifiers.contains(KeyModifiers::CONTROL) && key_event.code == KeyCode::Char('h') {
             self.ui.show_help = !self.ui.show_help;
@@ -330,7 +314,7 @@ impl ChatApp {
         Ok(false)
     }
 
-    pub fn handle_session_list_key(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_session_list_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         match key_event.code {
             KeyCode::Esc => {
                 self.ui.input_mode = InputMode::Normal;
@@ -359,7 +343,7 @@ impl ChatApp {
         Ok(false)
     }
 
-    pub fn handle_file_browser_key(&mut self, key_event: KeyEvent) -> Result<bool> {
+    pub async fn handle_file_browser_key(&mut self, key_event: KeyEvent) -> Result<bool> {
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.ui.input_mode = InputMode::Normal;

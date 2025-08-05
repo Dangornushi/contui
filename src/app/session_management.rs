@@ -51,7 +51,7 @@ impl ChatApp {
                 }
                 
                 self.ui.input_mode = InputMode::Normal;
-                self.scroll_to_bottom();
+                self.scroll_to_bottom(20);
             }
         }
     }
@@ -84,7 +84,7 @@ impl ChatApp {
                     }
                 }
                 
-                self.scroll_to_bottom();
+                self.scroll_to_bottom(20);
                 
                 // 選択位置を調整
                 let remaining_sessions = self.history_manager.get_history().get_session_list();

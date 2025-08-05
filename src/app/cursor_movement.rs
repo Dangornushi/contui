@@ -52,20 +52,6 @@ impl ChatApp {
         }
     }
 
-    // 指定した行の開始位置を取得
-    pub fn get_line_start_position(&self, line_index: usize) -> usize {
-        let lines: Vec<&str> = self.ui.input.lines().collect();
-        let mut position = 0;
-        
-        for (i, line) in lines.iter().enumerate() {
-            if i == line_index {
-                break;
-            }
-            position += line.graphemes(true).count() + 1; // +1 for newline character
-        }
-        
-        position
-    }
 
     // 文字入力のヘルパー関数
     pub fn insert_char(&mut self, c: char) {
@@ -120,11 +106,7 @@ impl ChatApp {
     }
 
     pub fn scroll_messages_down(&mut self) {
-        if !self.messages.is_empty() && self.ui.scroll_offset < self.messages.len().saturating_sub(1) {
-            self.ui.scroll_offset += 1;
-            // list_stateも更新して表示を同期
-            self.update_list_state_from_scroll();
-        }
+        self.ui.scroll_offset += 1;
     }
 
     // scroll_offsetからlist_stateを更新
