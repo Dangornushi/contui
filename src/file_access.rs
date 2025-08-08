@@ -165,7 +165,7 @@ impl FileAccessManager {
         }
         let file_path = path.as_ref();
         let original = fs::read_to_string(file_path)?;
-        let mut lines: Vec<&str> = original.lines().collect();
+        let lines: Vec<&str> = original.lines().collect();
 
         if start_line == 0 || end_line < start_line || end_line > lines.len() {
             return Err(anyhow!("Invalid line range"));

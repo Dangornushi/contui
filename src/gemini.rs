@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use crate::config::LlmConfig;
 use crate::file_access::FileAccessManager;
+use crate::history::ChatMessage;
 
 /// コマンド実行結果の構造体
 #[derive(Debug)]
@@ -22,6 +23,7 @@ struct GeminiRequest {
 
 #[derive(Debug, Serialize)]
 struct Content {
+    role: String,
     parts: Vec<Part>,
 }
 
@@ -83,17 +85,23 @@ impl GeminiClient {
     ) -> Result<String> {
         use tokio::time::{sleep, Duration};
         loop {
-            // デバッグ: POST送信直前
+            // デバッグ: POST送信直前 (contui_debug.log)
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
                 use std::io::Write;
                 let _ = writeln!(file, "[send_google_request_with_retry] POST to: {}\n", url);
+                let _ = writeln!(file, "[send_google_request_with_retry] Request Body: {} \n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
+            }
+            // LLMリクエストJSONをcontui_llm_request.logに出力
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_request.log") {
+                use std::io::Write;
+                let _ = writeln!(file, "{}\n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
             }
             let resp = self.client
                 .post(url)
                 .json(request)
                 .send()
                 .await;
-            // デバッグ: POST送信直後
+            // デバッグ: POST送信直後 (contui_debug.log)
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
                 use std::io::Write;
                 let _ = writeln!(file, "[send_google_request_with_retry] POST result: {:?}\n", resp.as_ref().map(|r| r.status()));
@@ -303,7 +311,6 @@ chmod +x script.sh
     async fn send_and_process_response(
         &self,
         request: GeminiRequest,
-        message: &str,
         process_actions: bool,
     ) -> Result<String> {
         let url = format!(
@@ -313,10 +320,15 @@ chmod +x script.sh
         let response_text = self
             .send_google_request_with_retry(&url, &request)
             .await?;
-        // デバッグ: レスポンス内容をファイルに追記
+        // デバッグ: レスポンス内容をファイルに追記 (contui_debug.log)
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
             use std::io::Write;
             let _ = writeln!(file, "[send_and_process_response] response_text:\n{}\n", response_text);
+        }
+        // LLMレスポンスJSONをcontui_llm_response.logに出力
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_response.log") {
+            use std::io::Write;
+            let _ = writeln!(file, "{}\n", response_text);
         }
         if response_text.contains("error") {
             eprintln!("Gemini API Error: {}", response_text);
@@ -336,41 +348,41 @@ chmod +x script.sh
         Err(anyhow::anyhow!("No response from Gemini"))
     }
 
-    pub async fn chat(&self, message: &str, context: Option<&[String]>) -> Result<String> {
+    pub async fn chat(&self, message: &str, context: Option<&[ChatMessage]>) -> Result<String> {
         // デバッグ: chat呼び出し直後
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
             use std::io::Write;
             let _ = writeln!(file, "[chat] called with message: {}\n", message);
         }
 
-        let mut conversation_text = String::new();
-        conversation_text.push_str(&self.get_system_prompt());
-        conversation_text.push_str("\n\n");
+        let mut contents: Vec<Content> = Vec::new();
+        contents.push(Content {
+            role: "user".to_string(),
+            parts: vec![Part {
+                text: self.get_system_prompt(),
+            }],
+        });
+
         if let Some(ctxs) = context {
-            if !ctxs.is_empty() {
-                conversation_text.push_str("Previous conversation:\n");
-                for ctx in ctxs {
-                    conversation_text.push_str(ctx);
-                    conversation_text.push('\n');
-                }
-                conversation_text.push_str("\nCurrent message:\n");
+            for msg in ctxs {
+                contents.push(Content {
+                    role: if msg.is_user { "user".to_string() } else { "model".to_string() },
+                    parts: vec![Part {
+                        text: msg.content.clone(),
+                    }],
+                });
             }
         }
-        conversation_text.push_str("User: ");
-        conversation_text.push_str(message);
 
-        // デバッグ: conversation_text生成後
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[chat] conversation_text:\n{}\n", conversation_text);
-        }
+        contents.push(Content {
+            role: "user".to_string(),
+            parts: vec![Part {
+                text: message.to_string(),
+            }],
+        });
 
         let request = GeminiRequest {
-            contents: vec![Content {
-                parts: vec![Part {
-                    text: conversation_text,
-                }],
-            }],
+            contents,
             generation_config: GenerationConfig {
                 temperature: self.config.temperature.unwrap_or(0.7),
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
@@ -448,46 +460,58 @@ chmod +x script.sh
         Err(anyhow::anyhow!("No response from Gemini"))
     }
 
-    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: &[String]) -> Result<String> {
-        let mut file_contents = String::new();
+    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: &[ChatMessage]) -> Result<String> {
+        let mut file_contents_text = String::new();
         for file_path in file_paths {
             match self.file_access.read_file(file_path) {
                 Ok(content) => {
-                    file_contents.push_str(&format!("\n--- File: {} ---\n", file_path));
-                    file_contents.push_str(&content);
-                    file_contents.push_str("\n--- End of file ---\n\n");
+                    file_contents_text.push_str(&format!("\n--- File: {} ---\n", file_path));
+                    file_contents_text.push_str(&content);
+                    file_contents_text.push_str("\n--- End of file ---\n\n");
                 }
                 Err(e) => {
                     eprintln!("Failed to read file {}: {}", file_path, e);
-                    file_contents.push_str(&format!("\n--- Error reading file: {} ---\n", file_path));
-                    file_contents.push_str(&format!("Error: {}\n\n", e));
+                    file_contents_text.push_str(&format!("\n--- Error reading file: {} ---\n", file_path));
+                    file_contents_text.push_str(&format!("Error: {}\n\n", e));
                 }
             }
         }
-        let mut conversation_text = String::new();
-        conversation_text.push_str(&self.get_system_prompt());
-        conversation_text.push_str("\n\n");
-        if !file_contents.is_empty() {
-            conversation_text.push_str("=== FILE CONTENTS ===\n");
-            conversation_text.push_str(&file_contents);
-            conversation_text.push_str("=== END FILE CONTENTS ===\n\n");
-        }
-        if !context.is_empty() {
-            conversation_text.push_str("Previous conversation:\n");
-            for ctx in context {
-                conversation_text.push_str(ctx);
-                conversation_text.push('\n');
-            }
-            conversation_text.push_str("\nCurrent message:\n");
-        }
-        conversation_text.push_str("User: ");
-        conversation_text.push_str(message);
-        let request = GeminiRequest {
-            contents: vec![Content {
-                parts: vec![Part {
-                    text: conversation_text,
-                }],
+
+        let mut contents: Vec<Content> = Vec::new();
+        contents.push(Content {
+            role: "user".to_string(),
+            parts: vec![Part {
+                text: self.get_system_prompt(),
             }],
+        });
+
+        if !file_contents_text.is_empty() {
+            contents.push(Content {
+                role: "user".to_string(),
+                parts: vec![Part {
+                    text: format!("=== FILE CONTENTS ===\n{}\n=== END FILE CONTENTS ===\n\n", file_contents_text),
+                }],
+            });
+        }
+
+        for msg in context {
+            contents.push(Content {
+                role: if msg.is_user { "user".to_string() } else { "model".to_string() },
+                parts: vec![Part {
+                    text: msg.content.clone(),
+                }],
+            });
+        }
+
+        contents.push(Content {
+            role: "user".to_string(),
+            parts: vec![Part {
+                text: message.to_string(),
+            }],
+        });
+
+        let request = GeminiRequest {
+            contents,
             generation_config: GenerationConfig {
                 temperature: self.config.temperature.unwrap_or(0.7),
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
@@ -700,6 +724,7 @@ chmod +x script.sh
     async fn get_ai_response_for_results(&self, context_message: &str) -> Result<String> {
         let request = GeminiRequest {
             contents: vec![Content {
+                role: "user".to_string(),
                 parts: vec![Part {
                     text: context_message.to_string(),
                 }],
@@ -709,7 +734,7 @@ chmod +x script.sh
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
             },
         };
-        self.send_and_process_response(request, context_message, false).await
+        self.send_and_process_response(request, false).await
     }
 
     /// **text** 形式を太字に変換するヘルパーメソッド（現在は無効化）
@@ -777,7 +802,7 @@ impl GeminiClient {
     /// LLMの返答→アクション実行→結果をLLMへ再送→LLMが次の指示を返すループ処理
     /// `initial_message` から開始し、LLMが「完了」「終了」等を返すまで自動で繰り返す
     pub async fn chat_loop(&self, initial_message: &str) -> anyhow::Result<()> {
-        let mut message = initial_message.to_string();
+        let mut message: String = initial_message.to_string();
         let mut step = 1;
         loop {
             // 毎回「次に何をすべきか」「追加タスクがあるか」を問うプロンプトを付与
@@ -786,7 +811,7 @@ impl GeminiClient {
                 message
             );
             println!("========== LLM Step {} ==========", step);
-            let response = self.chat(&prompt, None).await?;
+            let response = self.chat(&prompt, Some(&[])).await?;
             println!("LLM Response:\n{}\n", response);
 
             // is_finishedフラグで終了判定

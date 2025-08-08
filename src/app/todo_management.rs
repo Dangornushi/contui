@@ -13,7 +13,7 @@ impl ChatApp {
         self.ui.notification = Some(message.to_string());
     }
 
-    pub fn check_and_handle_failed_todos(&mut self, ai_response: &str) {
+    pub fn check_and_handle_failed_todos(&mut self, _ai_response: &str) {
         // TODO: Implement logic to check for failed TODOs and initiate recursive correction flow
         // This might involve parsing the AI response for specific failure indicators
         // and then generating a new message to the AI to correct the issue.
@@ -25,7 +25,15 @@ impl ChatApp {
             let completed_count = list.items.iter().filter(|item| item.completed).count();
             let total_count = list.items.len();
             if total_count > 0 {
-                response.push_str(&format!("\n\n📋 TODO Progress: {}/{}", completed_count, total_count));
+                response.push_str(&format!("\n\n📋 TODO進捗: {}/{}", completed_count, total_count));
+                // 実行中のTODO項目を抽出
+                let running: Vec<&crate::todo_manager::TodoItem> = list.items.iter().filter(|item| !item.completed).collect();
+                if !running.is_empty() {
+                    response.push_str("\n🔄 現在実行中のTODO:");
+                    for item in running {
+                        response.push_str(&format!("\n- {}", item.title));
+                    }
+                }
             }
         }
         response

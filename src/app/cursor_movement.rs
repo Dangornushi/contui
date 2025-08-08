@@ -1,4 +1,3 @@
-use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::ChatApp;

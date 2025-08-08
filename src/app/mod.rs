@@ -1,15 +1,15 @@
-use crossterm::terminal;
 use ratatui::{
-    widgets::ListState, Terminal,
+    widgets::ListState,
 };
+use uuid::Uuid;
+use chrono::Utc;
 use tokio::sync::mpsc;
-use crate::gemini::{self, GeminiClient};
+use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
 use crate::todo_manager::TodoManager;
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
-use regex::Regex;
 
 // モジュール宣言
 pub mod handler;
@@ -21,35 +21,13 @@ pub mod todo_management;
 pub mod visual_mode;
 pub mod terminal_util;
 
-#[derive(Debug)]
-pub enum ChatEvent {
-    AIResponse(String),
-    Error(String),
-}
+pub use crate::app::ui::ChatEvent;
 
-pub struct UiState {
-    pub input: String,
-    pub cursor_position: usize,
-    pub visual_start: Option<usize>,
-    pub input_mode: InputMode,
-    pub list_state: ListState,
-    pub scroll_offset: usize,
-    pub session_list_state: ListState,
-    pub file_browser_state: ListState,
-    pub current_directory: String,
-    pub directory_contents: Vec<String>,
-    pub selected_files: Vec<String>,
-    pub input_line_count: usize,
-    pub input_history: Vec<String>,
-    pub history_index: Option<usize>,
-    pub temp_input: String,
-    pub show_help: bool,
-    pub notification: Option<String>,
-}
+pub use crate::app::ui::UiState;
 
 pub struct ChatApp {
     pub ui: UiState,
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<crate::history::ChatMessage>,
     pub gemini_client: GeminiClient,
     pub event_sender: mpsc::UnboundedSender<ChatEvent>,
     pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
@@ -61,21 +39,8 @@ pub struct ChatApp {
     // pub terminal: Option<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>,
 }
 
-#[derive(Debug, PartialEq)]
-pub enum InputMode {
-    Normal,
-    Insert,
-    Visual,
-    SessionList,
-    FileBrowser,
-    // TodoList, // 削除
-}
+pub use crate::app::ui::InputMode;
 
-#[derive(Debug)]
-pub struct ChatMessage {
-    pub content: String,
-    pub is_user: bool,
-}
 
 impl ChatApp {
     pub fn new(
@@ -91,9 +56,11 @@ impl ChatApp {
         let mut messages = Vec::new();
         if let Some(session) = history_manager.get_history().get_current_session() {
             for hist_msg in &session.messages {
-                messages.push(ChatMessage {
+                messages.push(crate::history::ChatMessage {
+                    id: hist_msg.id,
                     content: hist_msg.content.clone(),
                     is_user: hist_msg.is_user,
+                    timestamp: hist_msg.timestamp,
                 });
             }
         }
@@ -152,9 +119,11 @@ impl ChatApp {
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
         if app.messages.is_empty() {
-            app.messages.push(ChatMessage {
+            app.messages.push(crate::history::ChatMessage {
+                id: Uuid::new_v4(),
                 content: "Welcome to ConTUI!".to_string(),
                 is_user: false,
+                timestamp: Utc::now(),
             });
         }
 
@@ -181,12 +150,18 @@ impl ChatApp {
                 let final_msg = self.append_todo_summary_to_response(processed_msg.clone());
                 
                 // AIレスポンスをメッセージリストに追加
-                self.messages.push(ChatMessage {
-                    content: final_msg,
+                let ai_msg = crate::history::ChatMessage {
+                    id: Uuid::new_v4(),
+                    content: final_msg.clone(),
                     is_user: false,
-                });
+                    timestamp: Utc::now(),
+                };
+                self.messages.push(ai_msg);
                 self.is_loading = false;
-                // スクロール位置の調整はUI描画時に行うためここでは何もしない
+                
+                // スクロール位置の自動調整
+                self.auto_scroll_if_at_bottom();
+                
                 // バッファがあれば自動送信イベントを発火
                 if let Some(next) = self.send_buffer.pop_front() {
                     if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
@@ -196,12 +171,20 @@ impl ChatApp {
                     let _ = self.event_sender.send(ChatEvent::AIResponse(format!("[BUFFERED_SEND]{}", next)));
                 }
                 
-                // 履歴管理にAIレスポンスを追加（処理後のメッセージ）
-                if let Err(_) = self.history_manager.get_history_mut().add_message(processed_msg.clone(), false) {
-                    // エラーは無視
+                // 履歴管理にAIレスポンスを追加（画面表示と同じ内容を保存）
+                // 必ず表示中セッションに保存する
+                if let Some(session) = self.history_manager.get_history().get_current_session() {
+                    let session_id = session.id;
+                    let _ = self.history_manager.get_history_mut().switch_session(session_id);
+                }
+                if let Err(e) = self.history_manager.get_history_mut().add_message(final_msg.clone(), false) {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
+                        let _ = writeln!(f, "[handle_chat_event] add_message error: {:?}", e);
+                        let _ = writeln!(f, "[handle_chat_event] current_session_id: {:?}", self.history_manager.get_history().current_session_id);
+                    }
                 }
                 
-                // 自動保存
+                // AIレスポンス追加直後に履歴保存
                 if let Err(_) = self.save_history() {
                     // エラーは無視
                 }
@@ -210,9 +193,11 @@ impl ChatApp {
                 if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
                     let _ = writeln!(f, "[handle_chat_event] Error: {}", err);
                 }
-                self.messages.push(ChatMessage {
+                self.messages.push(crate::history::ChatMessage {
+                    id: Uuid::new_v4(),
                     content: format!("Error: {}", err),
                     is_user: false,
+                    timestamp: Utc::now(),
                 });
                 self.is_loading = false;
                 // スクロール位置の調整はUI描画時に行うためここでは何もしない
@@ -241,15 +226,19 @@ impl ChatApp {
             match self.history_manager.clear_messages() {
                 Ok(_) => {
                     self.messages.clear();
-                    self.messages.push(ChatMessage {
+                    self.messages.push(crate::history::ChatMessage {
+                        id: Uuid::new_v4(),
                         content: "✅ ログを全て削除しました.".to_string(),
                         is_user: false,
+                        timestamp: Utc::now(),
                     });
                 }
                 Err(e) => {
-                    self.messages.push(ChatMessage {
+                    self.messages.push(crate::history::ChatMessage {
+                        id: Uuid::new_v4(),
                         content: format!("❌ ログ削除に失敗しました: {}", e),
                         is_user: false,
+                        timestamp: Utc::now(),
                     });
                 }
             }
@@ -296,11 +285,6 @@ impl ChatApp {
             }
         }
 
-        // 履歴管理にメッセージを追加
-        if let Err(_) = self.history_manager.get_history_mut().add_message(message_to_send.clone(), true) {
-            // エラーは無視
-        }
-
         // ユーザーメッセージを表示用に整形
         let display_message = if file_paths.is_empty() {
             message_to_send.clone()
@@ -308,19 +292,43 @@ impl ChatApp {
             format!("{}\nFiles: {}", message_to_send, file_paths.join(", "))
         };
 
-        // ユーザーメッセージを即座に追加
-        self.messages.push(ChatMessage {
-            content: display_message,
+        // ユーザーメッセージを即座に追加（新しいUUIDで）
+        let user_msg = crate::history::ChatMessage {
+            id: Uuid::new_v4(),
+            content: display_message.clone(),
             is_user: true,
-        });
+            timestamp: Utc::now(),
+        };
+        self.messages.push(user_msg.clone());
+
+        // 履歴管理にメッセージを追加（表示用と同じ内容）
+        if let Err(_) = self.history_manager.get_history_mut().add_message(display_message, true) {
+            // エラーは無視
+        }
+        
+        // ユーザーメッセージ送信後に履歴保存
+        if let Err(_) = self.save_history() {
+            // エラーは無視
+        }
 
         // 会話コンテキストを取得
         let mut context = self.history_manager.get_conversation_context(10);
 
+        use crate::history::ChatMessage;
+use uuid::Uuid;
+use chrono::Utc;
+
+// ... (既存のuse文)
+
         // TODOリストのコンテキストを追加
         let todo_context = self.todo_manager.get_context_for_llm();
         if !todo_context.is_empty() {
-            context.push(format!("\n## Current TODO List Context:\n{}", todo_context));
+            context.push(ChatMessage {
+                id: Uuid::new_v4(),
+                content: format!("\n## Current TODO List Context:\n{}", todo_context),
+                is_user: true, // TODOリストはユーザーからの情報とみなす
+                timestamp: Utc::now(),
+            });
         }
 
         // 非同期でLLMに送信
@@ -336,7 +344,7 @@ impl ChatApp {
                 let _ = writeln!(f, "[tokio::spawn] chat_loop_with_progress_static spawn. message={}", message);
             }
             let res = ChatApp::chat_loop_with_progress_static(gemini_client, &message, sender.clone()).await;
-            if let Err(e) = res {
+            if let Err(_e) = res {
                 // 通常のエラーは既に送信済み
             }
         });
@@ -397,6 +405,8 @@ impl ChatApp {
                     let _ = sender.send(ChatEvent::AIResponse(response_msg));
                     let lower = response.to_lowercase();
                     if gemini_client.extract_is_finished_flag(&lower).unwrap_or(false) {
+                        // 最終的なAIレスポンスを送信（履歴保存用）
+                        let _ = sender.send(ChatEvent::AIResponse(response.clone()));
                         let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
                         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
                         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
@@ -417,6 +427,10 @@ impl ChatApp {
                 }
             };
         }
+        // 最後のメッセージを最終レスポンスとして送信
+        if !message.is_empty() {
+            let _ = sender.send(ChatEvent::AIResponse(message));
+        }
         let finish_msg = "⚠️ LLM応答に「完了」等が含まれなかったため自動終了しました。".to_string();
         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
@@ -425,101 +439,7 @@ impl ChatApp {
         Ok(())
     }
 
-    pub fn process_file_creation_requests(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        let create_file_pattern = r"(?s)```create_file:([^\n]+)(?:\r?\n(.*?))?```";
-        let re = match Regex::new(create_file_pattern) {
-            Ok(regex) => regex,
-            Err(_) => {
-                return self.manual_parse_file_creation(response);
-            }
-        };
-        let mut files_created = Vec::new();
-        let matches: Vec<_> = re.captures_iter(response).collect();
-        if matches.is_empty() {
-            return response.to_string();
-        }
-        for caps in matches.iter() {
-            if let Some(filename_match) = caps.get(1) {
-                let filename = filename_match.as_str().trim();
-                let content = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-                match self.gemini_client.create_file_with_unique_name(filename, content) {
-                    Ok(actual_filename) => {
-                        files_created.push(actual_filename.clone());
-                        let success_message = if actual_filename == filename {
-                            format!("✅ File '{}' created successfully!", filename)
-                        } else {
-                            format!("✅ File '{}' created as '{}' (original name was taken)", filename, actual_filename)
-                        };
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &success_message
-                        );
-                    }
-                    Err(e) => {
-                        processed_response = processed_response.replace(
-                            &caps[0],
-                            &format!("❌ Failed to create file '{}' : {}", filename, e)
-                        );
-                        continue;
-                    }
-                }
-            }
-        }
-        if !files_created.is_empty() {
-            self.refresh_directory_contents();
-            let summary = format!("📁 ファイル作成: {}", files_created.join(", "));
-            self.ui.notification = Some(summary);
-        }
-        processed_response
-    }
-
-    pub fn manual_parse_file_creation(&mut self, response: &str) -> String {
-        let mut processed_response = response.to_string();
-        let mut files_created = Vec::new();
-        let lines: Vec<&str> = response.lines().collect();
-        let mut i = 0;
-        while i < lines.len() {
-            if lines[i].starts_with("```create_file:") {
-                let filename = lines[i].strip_prefix("```create_file:").unwrap_or("").trim();
-                if filename.is_empty() {
-                    i += 1;
-                    continue;
-                }
-                let mut content_lines = Vec::new();
-                i += 1;
-                while i < lines.len() && !lines[i].starts_with("```") {
-                    content_lines.push(lines[i]);
-                    i += 1;
-                }
-                let content = content_lines.join("\n");
-                match self.gemini_client.create_file_with_unique_name(filename, &content) {
-                    Ok(actual_filename) => {
-                        files_created.push(actual_filename.clone());
-                        let original_block = format!("```create_file:{}\n{}\n```", filename, content);
-                        let success_message = if actual_filename == filename {
-                            format!("✅ File '{}' created successfully!", filename)
-                        } else {
-                            format!("✅ File '{}' created as '{}' (original name was taken)", filename, actual_filename)
-                        };
-                        processed_response = processed_response.replace(&original_block, &success_message);
-                    }
-                    Err(e) => {
-                        let original_block = format!("```create_file:{}\n{}\n```", filename, content);
-                        let error_msg = format!("❌ Failed to create file '{}' : {}", filename, e);
-                        processed_response = processed_response.replace(&original_block, &error_msg);
-                    }
-                }
-            }
-            i += 1;
-        }
-        if !files_created.is_empty() {
-            self.refresh_directory_contents();
-            let summary = format!("\n\n📁 Created {} file(s): {}", files_created.len(), files_created.join(", "));
-            processed_response.push_str(&summary);
-        }
-        processed_response
-    }
+    // ファイル作成関連は file_operations.rs へ移譲
 
     pub fn save_history(&mut self) -> Result<()> {
         self.history_manager.save()
@@ -657,9 +577,11 @@ impl ChatApp {
     pub fn create_new_session(&mut self) {
         let _session_id = self.history_manager.get_history_mut().new_session(None);
         self.messages.clear();
-        self.messages.push(ChatMessage {
+        self.messages.push(crate::history::ChatMessage {
+            id: Uuid::new_v4(),
             content: "Started new conversation session.".to_string(),
             is_user: false,
+            timestamp: Utc::now(),
         });
         if let Err(_) = self.save_history() {
             // エラーは無視

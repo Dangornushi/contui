@@ -1,3 +1,39 @@
+// 状態管理用構造体・enum
+#[derive(Debug)]
+pub enum ChatEvent {
+    AIResponse(String),
+    Error(String),
+}
+
+pub struct UiState {
+    pub input: String,
+    pub cursor_position: usize,
+    pub visual_start: Option<usize>,
+    pub input_mode: InputMode,
+    pub list_state: ratatui::widgets::ListState,
+    pub scroll_offset: usize,
+    pub session_list_state: ratatui::widgets::ListState,
+    pub file_browser_state: ratatui::widgets::ListState,
+    pub current_directory: String,
+    pub directory_contents: Vec<String>,
+    pub selected_files: Vec<String>,
+    pub input_line_count: usize,
+    pub input_history: Vec<String>,
+    pub history_index: Option<usize>,
+    pub temp_input: String,
+    pub show_help: bool,
+    pub notification: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum InputMode {
+    Normal,
+    Insert,
+    Visual,
+    SessionList,
+    FileBrowser,
+    // TodoList, // 削除
+}
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -8,11 +44,13 @@ use ratatui::{
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
+use uuid::Uuid;
+use chrono::Utc;
 use unicode_segmentation::UnicodeSegmentation;
 
-use ratatui::Terminal;
 
-use crate::app::{ChatApp, InputMode, ChatMessage};
+use crate::app::ChatApp;
+use crate::history::ChatMessage;
 use crate::markdown::wrap_text;
 
 impl ChatApp {
@@ -23,22 +61,34 @@ impl ChatApp {
         terminal: &mut ratatui::Terminal<B>,
     ) {
         self.messages.push(ChatMessage {
-            is_user: false,
+            id: Uuid::new_v4(),
             content: msg,
+            is_user: false,
+            timestamp: Utc::now(),
         });
-        // メッセージ追加時にスクロール位置を最下部に自動設定
-        let total_lines = self.messages.iter().map(|msg| {
-            let prefix = if msg.is_user { "You" } else { "AI" };
-            let content = format!("{}: {}", prefix, msg.content);
-            // area.widthは取得できないため仮に80でラップ
-            wrap_text(&content, 72).lines().count()
-        }).sum::<usize>();
-        self.ui.scroll_offset = total_lines.saturating_sub(1);
+        
+        // スクロール位置の自動調整（最下部付近にいる場合のみ自動スクロール）
+        self.auto_scroll_if_at_bottom();
 
         // 再描画（run_appから呼ばれる場合のみ即時反映）
         let this = self as *mut Self;
         let render_fn = |f: &mut Frame| unsafe { (*this).render(f) };
         let _ = terminal.draw(render_fn);
+    }
+
+    /// 最下部付近にいる場合のみ自動スクロールする
+    pub fn auto_scroll_if_at_bottom(&mut self) {
+        let total_lines = self.messages.iter().map(|msg| {
+            let prefix = if msg.is_user { "You" } else { "AI" };
+            let content = format!("{}: {}", prefix, msg.content);
+            wrap_text(&content, 72).lines().count()
+        }).sum::<usize>();
+        
+        // 現在のスクロール位置が最下部から3行以内にある場合のみ自動スクロール
+        let max_scroll = total_lines.saturating_sub(1);
+        if self.ui.scroll_offset + 3 >= max_scroll {
+            self.ui.scroll_offset = max_scroll;
+        }
     }
     pub fn render(&mut self, f: &mut Frame) {
         if self.ui.input_mode == InputMode::SessionList {

@@ -177,17 +177,11 @@ impl HistoryManager {
         self.history.new_session(None)
     }
 
-    pub fn get_conversation_context(&self, max_messages: usize) -> Vec<String> {
+    pub fn get_conversation_context(&self, max_messages: usize) -> Vec<ChatMessage> {
         if let Some(session) = self.history.get_current_session() {
-            let mut context = Vec::new();
             let start_index = session.messages.len().saturating_sub(max_messages);
             
-            for message in &session.messages[start_index..] {
-                let role = if message.is_user { "User" } else { "Assistant" };
-                context.push(format!("{}: {}", role, message.content));
-            }
-            
-            context
+            session.messages[start_index..].to_vec()
         } else {
             Vec::new()
         }

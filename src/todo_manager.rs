@@ -50,7 +50,7 @@ impl TodoManager {
     pub fn get_context_for_llm(&self) -> String {
         if let Some(list) = &self.current_list {
             let mut ctx = format!("{}: {}\n", list.title, list.description);
-            for (i, item) in list.items.iter().enumerate() {
+            for (_i, item) in list.items.iter().enumerate() {
                 ctx.push_str(&format!("- [{}] {}\n", if item.completed { "x" } else { " " }, item.title));
             }
             ctx

@@ -1,7 +1,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
 use anyhow::Result;
 
-use crate::app::{ChatApp, InputMode, ChatMessage};
+use crate::app::{ChatApp, InputMode};
+use crate::history::ChatMessage;
+use uuid::Uuid;
+use chrono::Utc;
 use unicode_segmentation::UnicodeSegmentation;
 
 impl ChatApp {
@@ -49,13 +52,17 @@ impl ChatApp {
             KeyCode::Char('s') => {
                 if let Err(e) = self.save_history() {
                     self.messages.push(ChatMessage {
+                        id: Uuid::new_v4(),
                         content: format!("Error saving history: {}", e),
                         is_user: false,
+                        timestamp: Utc::now(),
                     });
                 } else {
                     self.messages.push(ChatMessage {
+                        id: Uuid::new_v4(),
                         content: "History saved successfully!".to_string(),
                         is_user: false,
+                        timestamp: Utc::now(),
                     });
                 }
             }
