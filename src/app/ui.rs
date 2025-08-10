@@ -373,8 +373,7 @@ impl ChatApp {
                 "  s                   - Save history",
                 "  S                   - Session list",
                 "  f                   - File browser",
-                "  t                   - Toggle TODO panel",
-                "  T                   - TODO list management",
+                
                 "  q                   - Quit",
                 "",
                 "Help:",

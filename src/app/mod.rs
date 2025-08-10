@@ -1,3 +1,4 @@
+use std::io::Write;
 use ratatui::{
     widgets::ListState,
 };
@@ -17,7 +18,6 @@ pub mod ui;
 pub mod file_operations;
 pub mod session_management;
 pub mod cursor_movement;
-pub mod todo_management;
 pub mod visual_mode;
 pub mod terminal_util;
 
@@ -33,7 +33,7 @@ pub struct ChatApp {
     pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
     pub is_loading: bool,
     pub history_manager: HistoryManager,
-    pub todo_manager: TodoManager,
+    //pub todo_manager: TodoManager,
     pub llm_task_handle: Option<tokio::task::JoinHandle<()>>, // LLMリクエスト用タスクハンドル
     pub send_buffer: std::collections::VecDeque<String>, // チャット送信バッファ
     // pub terminal: Option<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>>,
@@ -112,7 +112,6 @@ impl ChatApp {
             event_receiver,
             is_loading: false,
             history_manager,
-            todo_manager,
             llm_task_handle: None,
             send_buffer: std::collections::VecDeque::new(),
         };
@@ -141,13 +140,13 @@ impl ChatApp {
                 let processed_msg = self.process_file_creation_requests(&msg);
                 
                 // TODOリストの自動更新を実行
-                let _updated_items = self.todo_manager.update_from_ai_response(&processed_msg).unwrap_or_default();
+                //let _updated_items = self.todo_manager.update_from_ai_response(&processed_msg).unwrap_or_default();
 
-                // 失敗したTODOアイテムがあるかチェックし、再帰的修正フローを実行
-                self.check_and_handle_failed_todos(&processed_msg);
-                
-                // AIレスポンスにTODO情報を追加
-                let final_msg = self.append_todo_summary_to_response(processed_msg.clone());
+                let final_msg = if processed_msg.is_empty() {
+                    "AIからの応答がありませんでした。".to_string()
+                } else {
+                    processed_msg
+                };
                 
                 // AIレスポンスをメッセージリストに追加
                 let ai_msg = crate::history::ChatMessage {
@@ -185,8 +184,10 @@ impl ChatApp {
                 }
                 
                 // AIレスポンス追加直後に履歴保存
-                if let Err(_) = self.save_history() {
-                    // エラーは無視
+                if let Err(e) = self.save_history() {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
+                        let _ = writeln!(f, "[handle_chat_event] save_history error: {:?}", e);
+                    }
                 }
             }
             ChatEvent::Error(err) => {
@@ -276,6 +277,7 @@ impl ChatApp {
         };
 
         // TODOリストが存在しない場合、新しく作成するか確認
+        /*
         if self.todo_manager.current_list.is_none() && self.todo_manager.should_create_new_list(&message_to_send) {
             if let Err(e) = self.todo_manager.create_new_list(
                 format!("タスク: {}", message_to_send.chars().take(30).collect::<String>()),
@@ -283,7 +285,7 @@ impl ChatApp {
             ) {
                 self.show_notification(&format!("Error creating todo list: {}", e));
             }
-        }
+        }*/
 
         // ユーザーメッセージを表示用に整形
         let display_message = if file_paths.is_empty() {
@@ -307,20 +309,19 @@ impl ChatApp {
         }
         
         // ユーザーメッセージ送信後に履歴保存
-        if let Err(_) = self.save_history() {
-            // エラーは無視
+        if let Err(e) = self.save_history() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
+                let _ = writeln!(f, "[send_message] save_history error: {:?}", e);
+            }
         }
 
         // 会話コンテキストを取得
         let mut context = self.history_manager.get_conversation_context(10);
 
         use crate::history::ChatMessage;
-use uuid::Uuid;
-use chrono::Utc;
-
-// ... (既存のuse文)
 
         // TODOリストのコンテキストを追加
+        /* 
         let todo_context = self.todo_manager.get_context_for_llm();
         if !todo_context.is_empty() {
             context.push(ChatMessage {
@@ -329,7 +330,7 @@ use chrono::Utc;
                 is_user: true, // TODOリストはユーザーからの情報とみなす
                 timestamp: Utc::now(),
             });
-        }
+        }*/
 
         // 非同期でLLMに送信
         // 既存のLLMタスクがあればキャンセル
@@ -583,8 +584,10 @@ use chrono::Utc;
             is_user: false,
             timestamp: Utc::now(),
         });
-        if let Err(_) = self.save_history() {
-            // エラーは無視
+        if let Err(e) = self.save_history() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
+                let _ = writeln!(f, "[create_new_session] save_history error: {:?}", e);
+            }
         }
     }
 
