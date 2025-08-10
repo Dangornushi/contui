@@ -21,6 +21,7 @@ use config::Config;
 use gemini::GeminiClient;
 use history::HistoryManager;
 use app::terminal_util::{setup_terminal, cleanup_terminal};
+use std::sync::{Arc, Mutex};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,12 +42,12 @@ async fn main() -> Result<()> {
     
     // 履歴管理を初期化
     println!("Initializing history manager...");
-    let history_manager = HistoryManager::new()?;
+    let history_manager = Arc::new(Mutex::new(HistoryManager::new()?));
     println!("History manager initialized");
     
     // Geminiクライアントを作成
     println!("Creating Gemini client...");
-    let gemini_client = GeminiClient::new(config.llm);
+    let gemini_client = GeminiClient::new(config.llm, history_manager.clone());
     println!("Gemini client created");
 
     // ターミナルをセットアップ
@@ -57,7 +58,7 @@ async fn main() -> Result<()> {
     
     // アプリケーションを作成
     println!("Creating chat application...");
-    let mut app = ChatApp::new(gemini_client, history_manager);
+    let mut app = ChatApp::new(gemini_client, history_manager.clone());
     println!("Chat application created");
     
 

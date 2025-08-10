@@ -5,6 +5,8 @@ use crate::file_access::FileAccessManager;
 use crate::history::ChatMessage;
 use std::io::Write;
 use crate::debug_log;
+use crate::history::HistoryManager;
+use std::sync::{Arc, Mutex};
 
 /// コマンド実行結果の構造体
 #[derive(Debug)]
@@ -68,16 +70,19 @@ pub struct GeminiClient {
     client: reqwest::Client,
     config: LlmConfig,
     file_access: FileAccessManager,
+    history_manager: Arc<Mutex<HistoryManager>>, // Change type
 }
 
 impl GeminiClient {
-    pub fn new(config: LlmConfig) -> Self {
+    pub fn new(config: LlmConfig, history_manager: Arc<Mutex<HistoryManager>>) -> Self {
         Self {
             client: reqwest::Client::new(),
             config,
             file_access: FileAccessManager::new(),
+            history_manager,
         }
     }
+        
 
     /// Google APIリクエスト共通化＋429時3秒リトライ
     async fn send_google_request_with_retry(
@@ -333,6 +338,10 @@ chmod +x script.sh
         contents: Vec<Content>,
         original_message: &str,
     ) -> Result<String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.config.model, self.config.gemini_api_key
+        );
         let request = GeminiRequest {
             contents,
             generation_config: GenerationConfig {
@@ -340,10 +349,6 @@ chmod +x script.sh
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
             },
         };
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.config.model, self.config.gemini_api_key
-        );
 
         debug_log!("[send_chat_request_and_process_response] about to send API request to: {}\n", url);
 
@@ -724,7 +729,8 @@ impl GeminiClient {
                 message
             );
             println!("========== LLM Step {} ==========", step);
-            let response = self.chat(&prompt, Some(&[])).await?;
+            let conversation_context = self.history_manager.lock().unwrap().get_conversation_context(10); // Get last 10 messages
+            let response = self.chat(&prompt, Some(&conversation_context)).await?;
             println!("LLM Response:\n{}\n", response);
 
             // is_finishedフラグで終了判定

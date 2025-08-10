@@ -10,6 +10,7 @@ use crate::history::HistoryManager;
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
+use std::sync::{Arc, Mutex};
 
 // モジュール宣言
 pub mod handler;
@@ -31,7 +32,7 @@ pub struct ChatApp {
     pub event_sender: mpsc::UnboundedSender<ChatEvent>,
     pub event_receiver: mpsc::UnboundedReceiver<ChatEvent>,
     pub is_loading: bool,
-    pub history_manager: HistoryManager,
+    pub history_manager: Arc<Mutex<HistoryManager>>,
     //pub todo_manager: TodoManager,
     pub llm_task_handle: Option<tokio::task::JoinHandle<()>>, // LLMリクエスト用タスクハンドル
     pub send_buffer: std::collections::VecDeque<String>, // チャット送信バッファ
@@ -44,16 +45,16 @@ pub use crate::app::ui::InputMode;
 impl ChatApp {
     pub fn new(
         mut gemini_client: GeminiClient,
-        mut history_manager: HistoryManager,
+        history_manager: Arc<Mutex<HistoryManager>>,
     ) -> Self {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         
         // アクティブなセッションを確保
-        let _session_id = history_manager.ensure_active_session();
+        let _session_id = history_manager.lock().unwrap().ensure_active_session();
         
         // 現在のセッションからメッセージを読み込み
         let mut messages = Vec::new();
-        if let Some(session) = history_manager.get_history().get_current_session() {
+        if let Some(session) = history_manager.lock().unwrap().get_history().get_current_session() {
             for hist_msg in &session.messages {
                 messages.push(crate::history::ChatMessage {
                     id: hist_msg.id,
@@ -158,15 +159,16 @@ impl ChatApp {
                 
                 // 履歴管理にAIレスポンスを追加（画面表示と同じ内容を保存）
                 // 必ず表示中セッションに保存する
-                if let Some(session) = self.history_manager.get_history().get_current_session() {
-                    let session_id = session.id;
-                    let _ = self.history_manager.get_history_mut().switch_session(session_id);
-                }
-                if let Err(e) = self.history_manager.get_history_mut().add_message(final_msg.clone(), false) {
-                    debug_log!("[handle_chat_event] add_message error: {:?}", e);
-                    debug_log!("[handle_chat_event] current_session_id: {:?}", self.history_manager.get_history().current_session_id);
-                }
-                
+                {
+                    let mut history_guard = self.history_manager.lock().unwrap();
+                    if let Some(session) = history_guard.get_history().get_current_session() {
+                        let session_id = session.id;
+                        history_guard.get_history_mut().switch_session(session_id);
+                    }
+                    history_guard.get_history_mut().add_message(final_msg.clone(), false);
+                    debug_log!("[handle_chat_event] current_session_id: {:?}", history_guard.get_history().current_session_id);
+                } // history_guard is dropped here
+
                 // AIレスポンス追加直後に履歴保存
                 if let Err(e) = self.save_history() {
                     debug_log!("[handle_chat_event] save_history error: {:?}", e);
@@ -193,7 +195,7 @@ impl ChatApp {
 
         // /clearlogコマンド判定
         if original_message.trim() == "/clearlog" {
-            match self.history_manager.clear_messages() {
+            match self.history_manager.lock().unwrap().clear_messages() {
                 Ok(_) => {
                     self.messages.clear();
                     self.messages.push(crate::history::ChatMessage {
@@ -264,7 +266,7 @@ impl ChatApp {
         debug_log!("[send_message] メッセージ追加: {}", user_msg.content);
 
         // 履歴管理にメッセージを追加（表示用と同じ内容）
-        if let Err(_) = self.history_manager.get_history_mut().add_message(display_message, true) {
+        if let Err(_) = self.history_manager.lock().unwrap().get_history_mut().add_message(display_message, true) {
             // エラーは無視
         }
         
@@ -281,9 +283,10 @@ impl ChatApp {
         let message = message_to_send.clone();
         let sender = self.event_sender.clone();
         let gemini_client = self.gemini_client.clone();
+        let history_manager_clone = self.history_manager.clone();
         let handle = tokio::spawn(async move {
             debug_log!("[tokio::spawn] chat_loop_with_progress_static spawn. message={}", message);
-            let res = ChatApp::chat_loop_with_progress_static(gemini_client, &message, sender.clone()).await;
+            let res = ChatApp::chat_loop_with_progress_static(gemini_client, &message, sender.clone(), history_manager_clone).await;
             if let Err(_e) = res {
                 // 通常のエラーは既に送信済み
             }
@@ -300,6 +303,7 @@ impl ChatApp {
         gemini_client: crate::gemini::GeminiClient,
         initial_message: &str,
         sender: tokio::sync::mpsc::UnboundedSender<ChatEvent>,
+        history_manager: Arc<Mutex<HistoryManager>>, // Added this
     ) -> anyhow::Result<()> {
         let mut message = initial_message.to_string();
         let mut step = 1;
@@ -309,11 +313,18 @@ impl ChatApp {
             let progress_msg = format!("🤖 Step {}: LLMに問い合わせ中...", step);
             let _ = sender.send(ChatEvent::AIResponse(progress_msg));
             let prompt = format!(
-                "{}\n\n---\n次に何をすべきか、追加タスクがあるかを必ず明示してください。\n「完了」「終了」「何もする必要がない」などの場合は、その旨を明確に書いてください。",
+                "{}
+
+---
+次に何をすべきか、追加タスクがあるかを必ず明示してください。
+「完了」「終了」「何もする必要がない」などの場合は、その旨を明確に書いてください。",
                 message
             );
             debug_log!("[chat_loop_with_progress_static] prompt={}", prompt);
-            let response = match tokio::time::timeout(std::time::Duration::from_secs(30), gemini_client.chat(&prompt, None)).await {
+
+            // Get conversation context from history_manager
+            let conversation_context = history_manager.lock().unwrap().get_conversation_context(10); // Use history_manager
+            let response = match tokio::time::timeout(std::time::Duration::from_secs(30), gemini_client.chat(&prompt, Some(&conversation_context))).await {
                 Ok(r) => r,
                 Err(_) => {
                     debug_log!("[chat_loop_with_progress_static] LLMリクエストがタイムアウトしました");
@@ -332,6 +343,11 @@ impl ChatApp {
                     }
                     let response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response);
                     let _ = sender.send(ChatEvent::AIResponse(response_msg));
+
+                    // Add AI's response to history
+                    let mut history_guard = history_manager.lock().unwrap();
+                    history_guard.get_history_mut().add_message(response.clone(), false)?;
+
                     let lower = response.to_lowercase();
                     if gemini_client.extract_is_finished_flag(&lower).unwrap_or(false) {
                         // 最終的なAIレスポンスを送信（履歴保存用）
@@ -339,7 +355,7 @@ impl ChatApp {
                         let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
                         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
                         debug_log!("[chat_loop_with_progress_static] finish (done)");
-                        return Ok(());
+                        return Ok(())
                     }
                     message = response.clone();
                     step += 1;
@@ -364,7 +380,7 @@ impl ChatApp {
 
 
     pub fn save_history(&mut self) -> Result<()> {
-        self.history_manager.save()
+        self.history_manager.lock().unwrap().save()
     }
 
     pub fn add_to_input_history(&mut self, message: String) {
@@ -497,7 +513,7 @@ impl ChatApp {
     }
 
     pub fn create_new_session(&mut self) {
-        let _session_id = self.history_manager.get_history_mut().new_session(None);
+        let _session_id = self.history_manager.lock().unwrap().get_history_mut().new_session(None);
         self.messages.clear();
         self.messages.push(crate::history::ChatMessage {
             id: Uuid::new_v4(),

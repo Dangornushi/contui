@@ -490,7 +490,8 @@ impl ChatApp {
             .split(f.area());
 
         // セッション一覧を表示
-        let sessions = self.history_manager.get_history().get_session_list();
+        let history_guard = self.history_manager.lock().unwrap();
+        let sessions = history_guard.get_history().get_session_list();
         let session_items: Vec<ListItem> = sessions
             .iter()
             .map(|session| {
