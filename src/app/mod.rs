@@ -1,4 +1,4 @@
-use std::io::Write;
+use crate::debug_log;
 use ratatui::{
     widgets::ListState,
 };
@@ -123,18 +123,12 @@ impl ChatApp {
     }
 
     pub fn handle_chat_event(&mut self, event: ChatEvent) {
-        use std::io::Write;
         match event {
             ChatEvent::AIResponse(msg) => {
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                    let _ = writeln!(f, "[handle_chat_event] AIResponse: {}", msg);
-                }
+                debug_log!("[handle_chat_event] AIResponse: {}", msg);
                 // ファイル作成要求を処理
                 let processed_msg = self.process_file_creation_requests(&msg);
                 
-                // TODOリストの自動更新を実行
-                //let _updated_items = self.todo_manager.update_from_ai_response(&processed_msg).unwrap_or_default();
-
                 let final_msg = if processed_msg.is_empty() {
                     "AIからの応答がありませんでした。".to_string()
                 } else {
@@ -149,6 +143,7 @@ impl ChatApp {
                     timestamp: Utc::now(),
                 };
                 self.messages.push(ai_msg);
+                debug_log!("[handle_chat_event] メッセージ追加: {}", final_msg);
                 self.is_loading = false;
                 
                 // スクロール位置の自動調整
@@ -156,9 +151,7 @@ impl ChatApp {
                 
                 // バッファがあれば自動送信イベントを発火
                 if let Some(next) = self.send_buffer.pop_front() {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[handle_chat_event] バッファから自動送信イベント: {}", next);
-                    }
+                    debug_log!("[handle_chat_event] バッファから自動送信イベント: {}", next);
                     // ChatEvent::AIResponseでバッファ送信要求を通知
                     let _ = self.event_sender.send(ChatEvent::AIResponse(format!("[BUFFERED_SEND]{}", next)));
                 }
@@ -170,47 +163,30 @@ impl ChatApp {
                     let _ = self.history_manager.get_history_mut().switch_session(session_id);
                 }
                 if let Err(e) = self.history_manager.get_history_mut().add_message(final_msg.clone(), false) {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[handle_chat_event] add_message error: {:?}", e);
-                        let _ = writeln!(f, "[handle_chat_event] current_session_id: {:?}", self.history_manager.get_history().current_session_id);
-                    }
+                    debug_log!("[handle_chat_event] add_message error: {:?}", e);
+                    debug_log!("[handle_chat_event] current_session_id: {:?}", self.history_manager.get_history().current_session_id);
                 }
                 
                 // AIレスポンス追加直後に履歴保存
                 if let Err(e) = self.save_history() {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[handle_chat_event] save_history error: {:?}", e);
-                    }
+                    debug_log!("[handle_chat_event] save_history error: {:?}", e);
                 }
             }
-            ChatEvent::Error(err) => {
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                    let _ = writeln!(f, "[handle_chat_event] Error: {}", err);
-                }
-                self.messages.push(crate::history::ChatMessage {
-                    id: Uuid::new_v4(),
-                    content: format!("Error: {}", err),
-                    is_user: false,
-                    timestamp: Utc::now(),
-                });
+            ChatEvent::Error(msg) => {
+                debug_log!("[handle_chat_event] Error: {}", msg);
+                self.ui.notification = Some(msg);
                 self.is_loading = false;
-                // スクロール位置の調整はUI描画時に行うためここでは何もしない
             }
         }
     }
 
     pub async fn send_message(&mut self, _terminal: &mut ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>) {
-        use std::io::Write;
         self.ui.notification = None;
         let original_message = self.ui.input.clone();
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-            let _ = writeln!(f, "[send_message] called. input={}", original_message);
-        }
+        debug_log!("[send_message] called. input={}", original_message);
         // LLM応答待ち中ならバッファに積むだけ
         if self.is_loading {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[send_message] is_loading=true, bufferに積んだ: {}", original_message);
-            }
+            debug_log!("[send_message] is_loading=true, bufferに積んだ: {}", original_message);
             self.send_buffer.push_back(original_message.clone());
             return;
         }
@@ -269,16 +245,6 @@ impl ChatApp {
             clean_message
         };
 
-        // TODOリストが存在しない場合、新しく作成するか確認
-        /*
-        if self.todo_manager.current_list.is_none() && self.todo_manager.should_create_new_list(&message_to_send) {
-            if let Err(e) = self.todo_manager.create_new_list(
-                format!("タスク: {}", message_to_send.chars().take(30).collect::<String>()),
-                message_to_send.clone()
-            ) {
-                self.show_notification(&format!("Error creating todo list: {}", e));
-            }
-        }*/
 
         // ユーザーメッセージを表示用に整形
         let display_message = if file_paths.is_empty() {
@@ -295,6 +261,7 @@ impl ChatApp {
             timestamp: Utc::now(),
         };
         self.messages.push(user_msg.clone());
+        debug_log!("[send_message] メッセージ追加: {}", user_msg.content);
 
         // 履歴管理にメッセージを追加（表示用と同じ内容）
         if let Err(_) = self.history_manager.get_history_mut().add_message(display_message, true) {
@@ -303,9 +270,7 @@ impl ChatApp {
         
         // ユーザーメッセージ送信後に履歴保存
         if let Err(e) = self.save_history() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[send_message] save_history error: {:?}", e);
-            }
+            debug_log!("[send_message] save_history error: {:?}", e);
         }
 
         // 非同期でLLMに送信
@@ -317,9 +282,7 @@ impl ChatApp {
         let sender = self.event_sender.clone();
         let gemini_client = self.gemini_client.clone();
         let handle = tokio::spawn(async move {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[tokio::spawn] chat_loop_with_progress_static spawn. message={}", message);
-            }
+            debug_log!("[tokio::spawn] chat_loop_with_progress_static spawn. message={}", message);
             let res = ChatApp::chat_loop_with_progress_static(gemini_client, &message, sender.clone()).await;
             if let Err(_e) = res {
                 // 通常のエラーは既に送信済み
@@ -338,31 +301,22 @@ impl ChatApp {
         initial_message: &str,
         sender: tokio::sync::mpsc::UnboundedSender<ChatEvent>,
     ) -> anyhow::Result<()> {
-        use std::io::Write;
         let mut message = initial_message.to_string();
         let mut step = 1;
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-            let _ = writeln!(f, "[chat_loop_with_progress_static] start. message={}", message);
-        }
+        debug_log!("[chat_loop_with_progress_static] start. message={}", message);
         for _ in 0..10 {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[chat_loop_with_progress_static] step={}", step);
-            }
+            debug_log!("[chat_loop_with_progress_static] step={}", step);
             let progress_msg = format!("🤖 Step {}: LLMに問い合わせ中...", step);
             let _ = sender.send(ChatEvent::AIResponse(progress_msg));
             let prompt = format!(
                 "{}\n\n---\n次に何をすべきか、追加タスクがあるかを必ず明示してください。\n「完了」「終了」「何もする必要がない」などの場合は、その旨を明確に書いてください。",
                 message
             );
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[chat_loop_with_progress_static] prompt={}", prompt);
-            }
+            debug_log!("[chat_loop_with_progress_static] prompt={}", prompt);
             let response = match tokio::time::timeout(std::time::Duration::from_secs(30), gemini_client.chat(&prompt, None)).await {
                 Ok(r) => r,
                 Err(_) => {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[chat_loop_with_progress_static] LLMリクエストがタイムアウトしました");
-                    }
+                    debug_log!("[chat_loop_with_progress_static] LLMリクエストがタイムアウトしました");
                     let error_msg = "❌ LLMリクエストがタイムアウトしました".to_string();
                     let _ = sender.send(ChatEvent::Error(error_msg));
                     return Err(anyhow::anyhow!("LLMリクエストがタイムアウト"));
@@ -370,9 +324,7 @@ impl ChatApp {
             };
             match response {
                 Ok(response) => {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[chat_loop_with_progress_static] LLM response={}", response);
-                    }
+                    debug_log!("[chat_loop_with_progress_static] LLM response={}", response);
                     if response.is_empty() {
                         let error_msg = "❌ LLMからの応答が空です。再試行してください。".to_string();
                         let _ = sender.send(ChatEvent::Error(error_msg));
@@ -386,18 +338,14 @@ impl ChatApp {
                         let _ = sender.send(ChatEvent::AIResponse(response.clone()));
                         let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
                         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
-                        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                            let _ = writeln!(f, "[chat_loop_with_progress_static] finish (done)");
-                        }
+                        debug_log!("[chat_loop_with_progress_static] finish (done)");
                         return Ok(());
                     }
                     message = response.clone();
                     step += 1;
                 }
                 Err(e) => {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                        let _ = writeln!(f, "[chat_loop_with_progress_static] LLM error={}", e);
-                    }
+                    debug_log!("[chat_loop_with_progress_static] LLM error={}", e);
                     let error_msg = format!("❌ LLMとの通信に失敗しました: {}", e);
                     let _ = sender.send(ChatEvent::Error(error_msg));
                     return Err(e.into());
@@ -410,13 +358,10 @@ impl ChatApp {
         }
         let finish_msg = "⚠️ LLM応答に「完了」等が含まれなかったため自動終了しました。".to_string();
         let _ = sender.send(ChatEvent::AIResponse(finish_msg));
-        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-            let _ = writeln!(f, "[chat_loop_with_progress_static] finish (timeout)");
-        }
+        debug_log!("[chat_loop_with_progress_static] finish (timeout)");
         Ok(())
     }
 
-    // ファイル作成関連は file_operations.rs へ移譲
 
     pub fn save_history(&mut self) -> Result<()> {
         self.history_manager.save()
@@ -561,9 +506,7 @@ impl ChatApp {
             timestamp: Utc::now(),
         });
         if let Err(e) = self.save_history() {
-            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open("contui_debug.log") {
-                let _ = writeln!(f, "[create_new_session] save_history error: {:?}", e);
-            }
+            debug_log!("[create_new_session] save_history error: {:?}", e);
         }
     }
 

@@ -4,6 +4,7 @@ pub mod app;
 mod history;
 mod file_access;
 mod markdown;
+mod logger; // Add this line
 
 use crossterm::{
     event::{self, Event},
@@ -15,7 +16,7 @@ use std::{
     time::Duration,
 };
 use anyhow::Result;
-use app::{ChatApp, ChatEvent};
+use app::ChatApp;
 use config::Config;
 use gemini::GeminiClient;
 use history::HistoryManager;
@@ -24,8 +25,11 @@ use app::terminal_util::{setup_terminal, cleanup_terminal};
 #[tokio::main]
 async fn main() -> Result<()> {
     // プログラム開始時にデバッグログを初期化
-    if let Err(e) = std::fs::File::create("contui_debug.log") {
-        eprintln!("Failed to initialize debug log: {}", e);
+    println!("Initializing debug logger...");
+    if let Err(e) = logger::init_logger("contui_debug.log") {
+        eprintln!("Failed to initialize debug logger: {}", e);
+    } else {
+        logger::log_debug("Debug logger initialized.");
     }
     
     println!("Starting contui application...");
@@ -104,23 +108,7 @@ async fn run_app(
 
         // チャットイベントを処理
         while let Ok(chat_event) = app.event_receiver.try_recv() {
-            match chat_event {
-                ChatEvent::AIResponse(msg) => {
-                    if msg.starts_with("[BUFFERED_SEND]") {
-                        let buffered = msg.trim_start_matches("[BUFFERED_SEND]").to_string();
-                        app.ui.input = buffered;
-                        // バッファ送信時は通常のsend_messageを呼ぶ
-                        let _ = app.send_message(terminal).await;
-                    } else {
-                        app.push_ai_progress_message(msg, terminal);
-                        // 再描画（次ループで再描画されるが即時反映したい場合はここでも呼ぶ）
-                        terminal.draw(|f| app.render(f))?;
-                    }
-                }
-                _ => {
-                    app.handle_chat_event(chat_event);
-                }
-            }
+            app.handle_chat_event(chat_event);
         }
     }
 }

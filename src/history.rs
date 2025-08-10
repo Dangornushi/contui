@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use anyhow::Result;
+use crate::debug_log; // Add this line
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatSession {
@@ -74,12 +75,14 @@ impl ChatHistory {
 
         let message = ChatMessage {
             id: Uuid::new_v4(),
-            content,
+            content: content.clone(), // Clone content for logging
             is_user,
             timestamp: Utc::now(),
         };
 
         if let Some(session) = self.sessions.get_mut(&session_id) {
+            let message_type = if is_user { "User" } else { "AI" };
+            debug_log!("[DEBUG] ChatHistory: Added {} message to session {}: {}", message_type, session_id, content);
             session.messages.push(message);
             session.updated_at = Utc::now();
         } else {

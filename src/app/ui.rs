@@ -312,7 +312,6 @@ impl ChatApp {
             InputMode::FileBrowser => {
                 // ファイルブラウザモードではカーソル非表示
             }
-            // InputMode::TodoListは削除済み
         }
     }
 

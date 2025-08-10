@@ -3,6 +3,8 @@ use anyhow::Result;
 use crate::config::LlmConfig;
 use crate::file_access::FileAccessManager;
 use crate::history::ChatMessage;
+use std::io::Write;
+use crate::debug_log;
 
 /// コマンド実行結果の構造体
 #[derive(Debug)]
@@ -86,14 +88,10 @@ impl GeminiClient {
         use tokio::time::{sleep, Duration};
         loop {
             // デバッグ: POST送信直前 (contui_debug.log)
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                use std::io::Write;
-                let _ = writeln!(file, "[send_google_request_with_retry] POST to: {}\n", url);
-                let _ = writeln!(file, "[send_google_request_with_retry] Request Body: {} \n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
-            }
+            debug_log!("[send_google_request_with_retry] POST to: {}\n", url);
+            debug_log!("[send_google_request_with_retry] Request Body: {} \n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
             // LLMリクエストJSONをcontui_llm_request.logに出力
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_request.log") {
-                use std::io::Write;
                 let _ = writeln!(file, "{}\n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
             }
             let resp = self.client
@@ -102,40 +100,25 @@ impl GeminiClient {
                 .send()
                 .await;
             // デバッグ: POST送信直後 (contui_debug.log)
-            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                use std::io::Write;
-                let _ = writeln!(file, "[send_google_request_with_retry] POST result: {:?}\n", resp.as_ref().map(|r| r.status()));
-            }
+            debug_log!("[send_google_request_with_retry] POST result: {:?}\n", resp.as_ref().map(|r| r.status()));
             match resp {
                 Ok(response) => {
                     if response.status().as_u16() == 429 {
                         // 429: 3秒待ってリトライ
-                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                            use std::io::Write;
-                            let _ = writeln!(file, "[send_google_request_with_retry] 429 received, sleeping 3s\n");
-                        }
+                        debug_log!("[send_google_request_with_retry] 429 received, sleeping 3s\n");
                         sleep(Duration::from_secs(3)).await;
                         continue;
                     }
                     // デバッグ: response.text().await直前
-                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                        use std::io::Write;
-                        let _ = writeln!(file, "[send_google_request_with_retry] about to await response.text()\n");
-                    }
+                    debug_log!("[send_google_request_with_retry] about to await response.text()\n");
                     let text = response.text().await?;
                     // デバッグ: response.text().await直後
-                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                        use std::io::Write;
-                        let _ = writeln!(file, "[send_google_request_with_retry] response.text() done\n");
-                    }
+                    debug_log!("[send_google_request_with_retry] response.text() done\n");
                     return Ok(text);
                 }
                 Err(e) => {
                     // 通信エラー時も3秒待ってリトライ
-                    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-                        use std::io::Write;
-                        let _ = writeln!(file, "[send_google_request_with_retry] Err (retrying): {}\n", e);
-                    }
+                    debug_log!("[send_google_request_with_retry] Err (retrying): {}\n", e);
                     sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -149,7 +132,7 @@ impl GeminiClient {
 
     // システムプロンプトを作成
     fn get_system_prompt(&self) -> String {
-        r#"あなたはファイル作成・部分編集・コマンド実行機能を持つAIアシスタントです。
+        r###"あなたはファイル作成・部分編集・コマンド実行機能を持つAIアシスタントです。
 
 ## 部分編集機能
 ユーザーがファイルの一部だけを編集したい場合、以下の形式で部分編集できます：
@@ -237,7 +220,7 @@ chmod +x script.sh
 ---
 【重要】全ての返答の末尾に, タスクが終了したかを示すフラグである is_finished: true または is_finished: false を必ず明示してください（JSON形式または "is_finished: true" のような形式でOK）。
 また、is_finished:falseの際は、作業を完了させるためツールを実行すること。適切なツールが存在しない、また異常終終了しているなどの場合はtrueを返すこと。
-"#.to_string()
+"###.to_string()
     }
 
     /// レスポンステキストでファイル作成とコマンド実行を処理する共通関数
@@ -292,7 +275,7 @@ chmod +x script.sh
                 for file in &created_files {
                     context_message.push_str(&format!("- {}\n", file));
                 }
-                context_message.push('\n');
+                context_message.push_str("\n");
             }
 
             if !edited_files.is_empty() {
@@ -300,7 +283,7 @@ chmod +x script.sh
                 for file in &edited_files {
                     context_message.push_str(&format!("- {}\n", file));
                 }
-                context_message.push('\n');
+                context_message.push_str("\n");
             }
 
             // コマンド実行結果は外部で追加
@@ -321,14 +304,10 @@ chmod +x script.sh
             .send_google_request_with_retry(&url, &request)
             .await?;
         // デバッグ: レスポンス内容をファイルに追記 (contui_debug.log)
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[send_and_process_response] response_text:\n{}\n", response_text);
-        }
+        debug_log!("[send_and_process_response] response_text:\n{}\n", response_text);
         // LLMレスポンスJSONをcontui_llm_response.logに出力
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_response.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "{}\n", response_text);
+            let _ = writeln!(file, "{}", response_text);
         }
         if response_text.contains("error") {
             eprintln!("Gemini API Error: {}", response_text);
@@ -348,12 +327,88 @@ chmod +x script.sh
         Err(anyhow::anyhow!("No response from Gemini"))
     }
 
-    pub async fn chat(&self, message: &str, context: Option<&[ChatMessage]>) -> Result<String> {
-        // デバッグ: chat呼び出し直後
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[chat] called with message: {}\n", message);
+    // chatとchat_with_file_contextの共通処理をまとめたヘルパー関数
+    async fn send_chat_request_and_process_response(
+        &self,
+        contents: Vec<Content>,
+        original_message: &str,
+    ) -> Result<String> {
+        let request = GeminiRequest {
+            contents,
+            generation_config: GenerationConfig {
+                temperature: self.config.temperature.unwrap_or(0.7),
+                max_output_tokens: self.config.max_tokens.unwrap_or(1000),
+            },
+        };
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            self.config.model, self.config.gemini_api_key
+        );
+
+        debug_log!("[send_chat_request_and_process_response] about to send API request to: {}\n", url);
+
+        let response_text = self
+            .send_google_request_with_retry(&url, &request)
+            .await?;
+
+        debug_log!("[send_chat_request_and_process_response] response_text:\n{}\n", response_text);
+        if response_text.contains("error") {
+            eprintln!("Gemini API Error: {}", response_text);
+            return Err(anyhow::anyhow!("Gemini API Error: {}", response_text));
         }
+        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)?;
+        if let Some(candidate) = gemini_response.candidates.first() {
+            if let Some(part) = candidate.content.parts.first() {
+                let response_text = part.text.clone();
+                let (has_actions, mut context_message) = 
+                    self.process_response_actions_sync(&response_text, original_message);
+                let mut command_results = Vec::new();
+                if response_text.contains("```execute_command") {
+                    match self.process_command_execution_response(&response_text).await {
+                        Ok(results) => {
+                            command_results = results;
+                        }
+                        Err(e) => {
+                            eprintln!("コマンド実行エラー: {}", e);
+                        }
+                    }
+                }
+                if !command_results.is_empty() {
+                    context_message.push_str("コマンド実行結果:\n");
+                    for (i, result) in command_results.iter().enumerate() {
+                        debug_log!("[Command Result] Command: {}, Success: {}, Exit Code: {:?}, Stdout: {}, Stderr: {}\n",
+                                   result.command, result.success, result.exit_code, result.stdout, result.stderr);
+                        context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
+                        context_message.push_str(&format!(
+                            "   ステータス: {}\n",
+                            if result.success { "成功" } else { "失敗" }
+                        ));
+                        if let Some(code) = result.exit_code {
+                            context_message.push_str(&format!("   終了コード: {}\n", code));
+                        }
+                        if !result.stdout.is_empty() {
+                            context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
+                        }
+                        if !result.stderr.is_empty() {
+                            context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
+                        }
+                        context_message.push_str("\n");
+                    }
+                }
+
+                if has_actions || !command_results.is_empty() {
+                    let result = self.get_ai_response_for_results(&context_message).await?;
+                    return Ok(self.format_bold_text(&result));
+                } else {
+                    return Ok(self.format_bold_text(&response_text));
+                }
+            }
+        }
+        Err(anyhow::anyhow!("No response from Gemini"))
+    }
+
+    pub async fn chat(&self, message: &str, context: Option<&[ChatMessage]>) -> Result<String> {
+        debug_log!("[chat] called with message: {}\n", message);
 
         let mut contents: Vec<Content> = Vec::new();
         contents.push(Content {
@@ -381,86 +436,10 @@ chmod +x script.sh
             }],
         });
 
-        let request = GeminiRequest {
-            contents,
-            generation_config: GenerationConfig {
-                temperature: self.config.temperature.unwrap_or(0.7),
-                max_output_tokens: self.config.max_tokens.unwrap_or(1000),
-            },
-        };
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.config.model, self.config.gemini_api_key
-        );
-
-        // デバッグ: APIリクエスト直前
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[chat] about to send API request to: {}\n", url);
-        }
-
-        let response_text = self
-            .send_google_request_with_retry(&url, &request)
-            .await?;
-
-        // デバッグ: レスポンス内容をファイルに追記
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[chat] response_text:\n{}\n", response_text);
-        }
-        if response_text.contains("error") {
-            eprintln!("Gemini API Error: {}", response_text);
-            return Err(anyhow::anyhow!("Gemini API Error: {}", response_text));
-        }
-        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)?;
-        if let Some(candidate) = gemini_response.candidates.first() {
-            if let Some(part) = candidate.content.parts.first() {
-                let response_text = part.text.clone();
-                let (has_actions, mut context_message) =
-                    self.process_response_actions_sync(&response_text, message);
-                let mut command_results = Vec::new();
-                if response_text.contains("```execute_command") {
-                    match self.process_command_execution_response(&response_text).await {
-                        Ok(results) => {
-                            command_results = results;
-                        }
-                        Err(e) => {
-                            eprintln!("コマンド実行エラー: {}", e);
-                        }
-                    }
-                }
-                if has_actions {
-                    if !command_results.is_empty() {
-                        context_message.push_str("コマンド実行結果:\n");
-                        for (i, result) in command_results.iter().enumerate() {
-                            context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
-                            context_message.push_str(&format!(
-                                "   ステータス: {}\n",
-                                if result.success { "成功" } else { "失敗" }
-                            ));
-                            if let Some(code) = result.exit_code {
-                                context_message.push_str(&format!("   終了コード: {}\n", code));
-                            }
-                            if !result.stdout.is_empty() {
-                                context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
-                            }
-                            if !result.stderr.is_empty() {
-                                context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
-                            }
-                            context_message.push('\n');
-                        }
-                    }
-                    let result = self.get_ai_response_for_results(&context_message).await?;
-                    return Ok(self.format_bold_text(&result));
-                } else {
-                    return Ok(self.format_bold_text(&response_text));
-                }
-            }
-        }
-        Err(anyhow::anyhow!("No response from Gemini"))
+        self.send_chat_request_and_process_response(contents, message).await
     }
 
-    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: &[ChatMessage]) -> Result<String> {
+    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: Option<&[ChatMessage]>) -> Result<String> {
         let mut file_contents_text = String::new();
         for file_path in file_paths {
             match self.file_access.read_file(file_path) {
@@ -494,13 +473,15 @@ chmod +x script.sh
             });
         }
 
-        for msg in context {
-            contents.push(Content {
-                role: if msg.is_user { "user".to_string() } else { "model".to_string() },
-                parts: vec![Part {
-                    text: msg.content.clone(),
-                }],
-            });
+        if let Some(ctxs) = context {
+            for msg in ctxs {
+                contents.push(Content {
+                    role: if msg.is_user { "user".to_string() } else { "model".to_string() },
+                    parts: vec![Part {
+                        text: msg.content.clone(),
+                    }],
+                });
+            }
         }
 
         contents.push(Content {
@@ -510,75 +491,7 @@ chmod +x script.sh
             }],
         });
 
-        let request = GeminiRequest {
-            contents,
-            generation_config: GenerationConfig {
-                temperature: self.config.temperature.unwrap_or(0.7),
-                max_output_tokens: self.config.max_tokens.unwrap_or(1000),
-            },
-        };
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.config.model, self.config.gemini_api_key
-        );
-        let response_text = self
-            .send_google_request_with_retry(&url, &request)
-            .await?;
-        // デバッグ: レスポンス内容をファイルに追記
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_debug.log") {
-            use std::io::Write;
-            let _ = writeln!(file, "[chat_with_file_context] response_text:\n{}\n", response_text);
-        }
-        if response_text.contains("error") {
-            eprintln!("Gemini API Error: {}", response_text);
-            return Err(anyhow::anyhow!("Gemini API Error: {}", response_text));
-        }
-        let gemini_response: GeminiResponse = serde_json::from_str(&response_text)?;
-        if let Some(candidate) = gemini_response.candidates.first() {
-            if let Some(part) = candidate.content.parts.first() {
-                let response_text = part.text.clone();
-                let (has_actions, mut context_message) =
-                    self.process_response_actions_sync(&response_text, message);
-                let mut command_results = Vec::new();
-                if response_text.contains("```execute_command") {
-                    match self.process_command_execution_response(&response_text).await {
-                        Ok(results) => {
-                            command_results = results;
-                        }
-                        Err(e) => {
-                            eprintln!("コマンド実行エラー: {}", e);
-                        }
-                    }
-                }
-                if has_actions {
-                    if !command_results.is_empty() {
-                        context_message.push_str("コマンド実行結果:\n");
-                        for (i, result) in command_results.iter().enumerate() {
-                            context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
-                            context_message.push_str(&format!(
-                                "   ステータス: {}\n",
-                                if result.success { "成功" } else { "失敗" }
-                            ));
-                            if let Some(code) = result.exit_code {
-                                context_message.push_str(&format!("   終了コード: {}\n", code));
-                            }
-                            if !result.stdout.is_empty() {
-                                context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
-                            }
-                            if !result.stderr.is_empty() {
-                                context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
-                            }
-                            context_message.push('\n');
-                        }
-                    }
-                    let result = self.get_ai_response_for_results(&context_message).await?;
-                    return Ok(self.format_bold_text(&result));
-                } else {
-                    return Ok(self.format_bold_text(&response_text));
-                }
-            }
-        }
-        Err(anyhow::anyhow!("No response from Gemini"))
+        self.send_chat_request_and_process_response(contents, message).await
     }
 
     pub fn list_directory(&self, path: &str) -> Result<Vec<String>> {
@@ -616,7 +529,7 @@ chmod +x script.sh
                 // ``` で終わるまで、または最後の行まで内容を収集
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !content.is_empty() {
-                        content.push('\n');
+                        content.push_str("\n");
                     }
                     content.push_str(lines[i]);
                     i += 1;
@@ -628,7 +541,7 @@ chmod +x script.sh
                         created_files.push(created_path);
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!("❌ ファイル作成失敗 '{}': {}", filename, e));
+                        return Err(anyhow::anyhow!("❌ ファイル作成失敗 {}: {}", filename, e));
                     }
                 }
             }
@@ -685,7 +598,7 @@ chmod +x script.sh
                 // ``` で終わるまで、または最後の行まで内容を収集
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !command.is_empty() {
-                        command.push('\n');
+                        command.push_str("\n");
                     }
                     command.push_str(lines[i]);
                     i += 1;
@@ -753,7 +666,7 @@ chmod +x script.sh
             // edit_file:ファイル名:開始行:終了行 の開始を検出
             if line.starts_with("```edit_file:") {
                 let header = line.trim_start_matches("```edit_file:").trim();
-                let parts: Vec<&str> = header.split(':').collect();
+                let parts: Vec<&str> = header.split(":").collect();
                 if parts.len() != 3 {
                     i += 1;
                     continue;
@@ -771,7 +684,7 @@ chmod +x script.sh
                 i += 1;
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !content.is_empty() {
-                        content.push('\n');
+                        content.push_str("\n");
                     }
                     content.push_str(lines[i]);
                     i += 1;
@@ -783,7 +696,7 @@ chmod +x script.sh
                         edited_files.push(filename.to_string());
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!("❌ 部分編集失敗 '{}': {}", filename, e));
+                        return Err(anyhow::anyhow!("❌ 部分編集失敗 {}: {}", filename, e));
                     }
                 }
             }
