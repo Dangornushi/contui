@@ -1,4 +1,3 @@
-mod todo_manager;
 mod config;
 mod gemini;
 pub mod app;

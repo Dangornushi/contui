@@ -7,7 +7,6 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
-use crate::todo_manager::TodoManager;
 use anyhow::Result;
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
@@ -80,12 +79,6 @@ impl ChatApp {
                 // Directory access permission error - silently continue
             }
         }
-        
-        let todo_manager = TodoManager::new().unwrap_or_else(|_| {
-            // TODOマネージャーの初期化に失敗した場合は空のマネージャーを作成
-            TodoManager { current_list: None, storage_path: "todo_state.json".to_string() }
-        });
-
         let mut app = Self {
             ui: UiState {
                 input: String::new(),
@@ -314,23 +307,6 @@ impl ChatApp {
                 let _ = writeln!(f, "[send_message] save_history error: {:?}", e);
             }
         }
-
-        // 会話コンテキストを取得
-        let mut context = self.history_manager.get_conversation_context(10);
-
-        use crate::history::ChatMessage;
-
-        // TODOリストのコンテキストを追加
-        /* 
-        let todo_context = self.todo_manager.get_context_for_llm();
-        if !todo_context.is_empty() {
-            context.push(ChatMessage {
-                id: Uuid::new_v4(),
-                content: format!("\n## Current TODO List Context:\n{}", todo_context),
-                is_user: true, // TODOリストはユーザーからの情報とみなす
-                timestamp: Utc::now(),
-            });
-        }*/
 
         // 非同期でLLMに送信
         // 既存のLLMタスクがあればキャンセル
