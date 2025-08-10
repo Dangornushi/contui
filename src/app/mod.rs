@@ -167,7 +167,7 @@ impl ChatApp {
                     }
                     history_guard.get_history_mut().add_message(final_msg.clone(), false);
                     debug_log!("[handle_chat_event] current_session_id: {:?}", history_guard.get_history().current_session_id);
-                } // history_guard is dropped here
+                }
 
                 // AIレスポンス追加直後に履歴保存
                 if let Err(e) = self.save_history() {

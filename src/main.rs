@@ -24,6 +24,7 @@ use app::terminal_util::{setup_terminal, cleanup_terminal};
 use std::sync::{Arc, Mutex};
 
 #[tokio::main]
+
 async fn main() -> Result<()> {
     // プログラム開始時にデバッグログを初期化
     println!("Initializing debug logger...");
