@@ -168,9 +168,7 @@ impl ChatApp {
         let messages_list = List::new(visible_lines)
             .block(
                 Block::default()
-                    .borders(Borders::ALL)
                     .title("Chat History")
-                    .border_type(BorderType::Rounded),
             );
 
         f.render_widget(messages_list, area);
