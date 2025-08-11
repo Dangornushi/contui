@@ -7,6 +7,15 @@ use chrono::Local;
 
 static LOGGER: OnceCell<Arc<Mutex<File>>> = OnceCell::new();
 
+pub fn reset_log_file(path: &str) -> anyhow::Result<()> {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    Ok(())
+}
+
 pub fn init_logger(path: &str) -> anyhow::Result<()> {
     let file = OpenOptions::new()
         .create(true)

@@ -142,33 +142,28 @@ impl ChatApp {
         // 2. スクロールオフセットで表示範囲を決定
         let total_lines = virtual_lines.len();
         let height = area.height.saturating_sub(2) as usize; // 枠線分
-        if total_lines == 0 {
-            // 空の場合
-            let empty = ListItem::new(Text::from("No messages")).style(Style::default());
-            let messages_list = List::new(vec![empty])
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("Chat History")
-                        .border_type(BorderType::Rounded),
-                );
-            f.render_widget(messages_list, area);
-            return;
-        }
+        let visible_lines: Vec<ListItem>;
 
-        // scroll_offsetは「仮想行リスト」の先頭行インデックス
-        // 範囲外なら補正
-        if self.ui.scroll_offset > total_lines.saturating_sub(1) {
-            self.ui.scroll_offset = total_lines.saturating_sub(1);
-        }
-        let start = self.ui.scroll_offset;
-        let end = (start + height).min(total_lines);
+        if total_lines != 0 {
+            // scroll_offsetは「仮想行リスト」の先頭行インデックス
+            // 範囲外なら補正
+            if self.ui.scroll_offset > total_lines.saturating_sub(1) {
+                self.ui.scroll_offset = total_lines.saturating_sub(1);
+            }
+            let start = self.ui.scroll_offset;
+            let end = (start + height).min(total_lines);
 
-        // 3. 表示するListItemを作成
-        let visible_lines: Vec<ListItem> = virtual_lines[start..end]
-            .iter()
-            .map(|(line, style)| ListItem::new(Text::from(line.clone())).style(*style))
-            .collect();
+            // 3. 表示するListItemを作成
+            visible_lines = virtual_lines[start..end]
+                .iter()
+                .map(|(line, style)| ListItem::new(Text::from(line.clone())).style(*style))
+                .collect();
+        }
+        else {
+            visible_lines = vec![
+                ListItem::new(Text::from("No messages")).style(Style::default())
+            ];
+        }
 
         let messages_list = List::new(visible_lines)
             .block(

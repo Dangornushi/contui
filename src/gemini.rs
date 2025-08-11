@@ -23,6 +23,8 @@ struct GeminiRequest {
     contents: Vec<Content>,
     #[serde(rename = "generationConfig")]
     generation_config: GenerationConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Tool>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,7 +45,19 @@ struct GenerationConfig {
     max_output_tokens: u32,
 }
 
+// Tool definitions for function calling
+#[derive(Debug, Serialize)]
+struct Tool {
+    #[serde(rename = "functionDeclarations")]
+    function_declarations: Vec<FunctionDeclaration>,
+}
 
+#[derive(Debug, Serialize)]
+struct FunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
 
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
@@ -61,8 +75,16 @@ struct ResponseContent {
 }
 
 #[derive(Debug, Deserialize)]
-struct ResponsePart {
-    text: String,
+#[serde(untagged)]
+enum ResponsePart {
+    Text { text: String },
+    FunctionCall { #[serde(rename = "functionCall")] function_call: FunctionCall },
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionCall {
+    name: String,
+    args: serde_json::Value,
 }
 
 #[derive(Clone)]
@@ -135,165 +157,156 @@ impl GeminiClient {
         self.file_access.add_allowed_directory(path)
     }
 
+    /// Function declarations for Gemini Function Calling
+    fn get_function_declarations(&self) -> Vec<Tool> {
+        vec![
+            Tool {
+                function_declarations: vec![
+                    FunctionDeclaration {
+                        name: "create_file".to_string(),
+                        description: "ファイルを作成します".to_string(),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "filename": {
+                                    "type": "string",
+                                    "description": "作成するファイル名"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "ファイルの内容"
+                                }
+                            },
+                            "required": ["filename", "content"]
+                        }),
+                    },
+                    FunctionDeclaration {
+                        name: "edit_file".to_string(),
+                        description: "ファイルの一部を編集します".to_string(),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "filename": {
+                                    "type": "string",
+                                    "description": "編集するファイル名"
+                                },
+                                "start_line": {
+                                    "type": "integer",
+                                    "description": "編集開始行（1始まり）"
+                                },
+                                "end_line": {
+                                    "type": "integer",
+                                    "description": "編集終了行（1始まり）"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "新しい内容"
+                                }
+                            },
+                            "required": ["filename", "start_line", "end_line", "content"]
+                        }),
+                    },
+                    FunctionDeclaration {
+                        name: "execute_command".to_string(),
+                        description: "シェルコマンドを実行します".to_string(),
+                        parameters: serde_json::json!({
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "description": "実行するコマンド"
+                                },
+                                "silent": {
+                                    "type": "boolean",
+                                    "description": "サイレント実行かどうか（デフォルト: false）"
+                                }
+                            },
+                            "required": ["command"]
+                        }),
+                    },
+                ],
+            }
+        ]
+    }
+
+    /// Handle function call from Gemini API
+    async fn handle_function_call(&self, function_call: &FunctionCall) -> Result<String> {
+        debug_log!("[handle_function_call] Function: {}, Args: {:?}", function_call.name, function_call.args);
+        
+        match function_call.name.as_str() {
+            "create_file" => {
+                let filename = function_call.args["filename"].as_str()
+                    .ok_or(anyhow::anyhow!("filename parameter is required"))?;
+                let content = function_call.args["content"].as_str()
+                    .ok_or(anyhow::anyhow!("content parameter is required"))?;
+                
+                match self.create_file_with_unique_name(filename, content) {
+                    Ok(created_path) => Ok(format!("✅ ファイルを作成しました: {}", created_path)),
+                    Err(e) => Ok(format!("❌ ファイル作成に失敗しました: {}", e)),
+                }
+            },
+            "edit_file" => {
+                let filename = function_call.args["filename"].as_str()
+                    .ok_or(anyhow::anyhow!("filename parameter is required"))?;
+                let start_line = function_call.args["start_line"].as_u64()
+                    .ok_or(anyhow::anyhow!("start_line parameter is required"))? as usize;
+                let end_line = function_call.args["end_line"].as_u64()
+                    .ok_or(anyhow::anyhow!("end_line parameter is required"))? as usize;
+                let content = function_call.args["content"].as_str()
+                    .ok_or(anyhow::anyhow!("content parameter is required"))?;
+                
+                match self.file_access.edit_file_range(filename, start_line, end_line, content) {
+                    Ok(_) => Ok(format!("✅ ファイルを編集しました: {}", filename)),
+                    Err(e) => Ok(format!("❌ ファイル編集に失敗しました: {}", e)),
+                }
+            },
+            "execute_command" => {
+                let command = function_call.args["command"].as_str()
+                    .ok_or(anyhow::anyhow!("command parameter is required"))?;
+                let _silent = function_call.args["silent"].as_bool().unwrap_or(false);
+                
+                match self.execute_command(command).await {
+                    Ok(result) => {
+                        if result.success {
+                            Ok(format!("✅ コマンド実行成功: {}\n出力: {}", command, result.stdout))
+                        } else {
+                            Ok(format!("❌ コマンド実行失敗: {}\nエラー: {}", command, result.stderr))
+                        }
+                    },
+                    Err(e) => Ok(format!("❌ コマンド実行エラー: {}", e)),
+                }
+            },
+            _ => Ok(format!("❌ 未知の関数呼び出し: {}", function_call.name)),
+        }
+    }
+
     // システムプロンプトを作成
     fn get_system_prompt(&self) -> String {
         r###"あなたはファイル作成・部分編集・コマンド実行機能を持つAIアシスタントです。
 
-## 部分編集機能
-ユーザーがファイルの一部だけを編集したい場合、以下の形式で部分編集できます：
+ユーザーのリクエストに応じて、以下の機能を提供できます：
 
-```edit_file:ファイル名:開始行:終了行
-新しい内容
-```
+1. **ファイル作成**: 新しいファイルを作成
+2. **ファイル編集**: 既存ファイルの部分編集
+3. **コマンド実行**: シェルコマンドの実行
 
-- 開始行・終了行は1始まりの行番号です（例：1〜3なら1,2,3行目）。
-- 編集可能かどうかは、編集範囲がファイル内に収まっているか、編集内容が部分的に適用できるかで判定してください。
-- 可能な場合は部分編集を優先し、edit_file形式で指示してください。
-- 編集が困難な場合は、従来通りcreate_file形式で全体を書き換えてください。
-
-## ファイル作成機能
-ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
-
-## ファイル作成機能
-ユーザーがファイルの作成を依頼した場合、以下の正確な形式を使用してファイルを作成できます：
-
-```create_file:ファイル名.拡張子
-ファイルの内容をここに記述
-```
-
-## コマンド実行機能
-ユーザーがコマンドの実行を依頼した場合、以下の正確な形式を使用してコマンドを実行できます：
-
-### 標準コマンド実行（出力を表示）
-```execute_command
-実行したいコマンド
-```
-
-### サイレントコマンド実行（出力を非表示）
-```execute_command_silent
-実行したいコマンド
-```
-
-**出力制御の判断基準:**
-- ファイル内容の確認（cat, less, head, tail等）→ 標準実行
-- ディレクトリの確認（ls, find等）→ 標準実行  
-- システム情報の取得（ps, df, uname等）→ 標準実行
-- デバッグ目的の実行 → 標準実行
-- ファイルの移動/削除（mv, rm, cp等）→ サイレント実行
-- 設定変更（chmod, chown等）→ サイレント実行
-- パッケージ管理（apt, brew等）→ サイレント実行
-- バックグラウンド処理 → サイレント実行
-
-重要な指示：
-1. ファイル作成：必ず上記の形式を正確に使用してください（```create_file:ファイル名）
-2. コマンド実行：標準実行かサイレント実行かを適切に判断してください
-3. 空のファイルの場合は、形式は使用しますが内容部分は空にしてください
-4. あらゆるファイル形式を作成できます（.txt, .rs, .py, .html, .json など）
-5. シェルコマンド、システムコマンド、プログラム実行など、様々なコマンドを実行できます
-6. 安全で適切なコマンドのみを実行してください
-
-例：
-- 空のテキストファイル: ```create_file:test.txt
-
-- Rustファイル: ```create_file:main.rs
-fn main() {
-    println!("Hello, world!");
-}
-
-- JSONファイル: ```create_file:config.json
-{
-  "name": "example",
-  "version": "1.0.0"
-}
-
-- ディレクトリの内容を表示: ```execute_command
-ls -la
-
-- ファイルの内容を確認: ```execute_command
-cat config.json
-
-- ファイルを移動: ```execute_command_silent
-mv old_file.txt new_file.txt
-
-- 権限を変更: ```execute_command_silent
-chmod +x script.sh
-
-ユーザーがファイル作成やコマンド実行を依頼した場合は、必ず肯定的に応答し、上記の形式を使用してください。「ファイルを作成できません」や「コマンドを実行できません」と言わないでください - あなたはこれらの形式を使用して実行できますし、そうするべきです。
-
-注意：同じファイル名が既に存在する場合、システムが自動的にユニークな名前で作成します（例：file.txt → file_1.txt）。
+これらの機能は、Function Calling機能を通じて実行されます。必要に応じて適切な関数を呼び出してください。
 
 ---
 【重要】全ての返答の末尾に, タスクが終了したかを示すフラグである is_finished: true または is_finished: false を必ず明示してください（JSON形式または "is_finished: true" のような形式でOK）。
-また、is_finished:falseの際は、作業を完了させるためツールを実行すること。適切なツールが存在しない、また異常終終了しているなどの場合はtrueを返すこと。
+また、is_finished:falseの際は、作業を完了させるため適切な関数を呼び出すこと。適切な関数が存在しない、また異常終了しているなどの場合はtrueを返すこと。
 "###.to_string()
     }
 
     /// レスポンステキストでファイル作成とコマンド実行を処理する共通関数
+    /// Function Calling移行により、疑似ツール処理は無効化
     fn process_response_actions_sync(
         &self,
-        response_text: &str,
-        original_message: &str,
+        _response_text: &str,
+        _original_message: &str,
     ) -> (bool, String) {
-        let mut has_actions = false;
-        let mut created_files = Vec::new();
-        let mut edited_files = Vec::new();
-
-        // ファイル作成が含まれているかチェックして自動実行
-        if response_text.contains("```create_file:") {
-            has_actions = true;
-            match self.process_file_creation_response(response_text) {
-                Ok(files) => {
-                    created_files = files;
-                }
-                Err(e) => {
-                    eprintln!("ファイル作成エラー: {}", e);
-                }
-            }
-        }
-
-        // コマンド実行が含まれているかチェックして自動実行
-        if response_text.contains("```execute_command") {
-            has_actions = true;
-            // 非同期呼び出しは外部で行う
-        }
-
-        // 部分編集が含まれているかチェックして自動実行
-        if response_text.contains("```edit_file:") {
-            has_actions = true;
-            match self.process_edit_file_response(response_text) {
-                Ok(files) => {
-                    edited_files = files;
-                }
-                Err(e) => {
-                    eprintln!("部分編集エラー: {}", e);
-                }
-            }
-        }
-
-        let mut context_message = String::new();
-        if has_actions {
-            context_message.push_str("以下のアクションが実行されました。結果を確認して、適切な回答やコメントをしてください：\n\n");
-            context_message.push_str(&format!("元のリクエスト: {}\n\n", original_message));
-
-            if !created_files.is_empty() {
-                context_message.push_str(&format!("作成されたファイル ({} 個):\n", created_files.len()));
-                for file in &created_files {
-                    context_message.push_str(&format!("- {}\n", file));
-                }
-                context_message.push_str("\n");
-            }
-
-            if !edited_files.is_empty() {
-                context_message.push_str(&format!("部分編集されたファイル ({} 個):\n", edited_files.len()));
-                for file in &edited_files {
-                    context_message.push_str(&format!("- {}\n", file));
-                }
-                context_message.push_str("\n");
-            }
-
-            // コマンド実行結果は外部で追加
-        }
-        (has_actions, context_message)
+        // Function Calling移行により、この処理は不要
+        (false, String::new())
     }
 
     async fn _send_request_and_parse_response(
@@ -320,7 +333,13 @@ chmod +x script.sh
         let gemini_response: GeminiResponse = serde_json::from_str(&response_text)?;
         if let Some(candidate) = gemini_response.candidates.first() {
             if let Some(part) = candidate.content.parts.first() {
-                return Ok(part.text.clone());
+                match part {
+                    ResponsePart::Text { text } => return Ok(text.clone()),
+                    ResponsePart::FunctionCall { function_call } => {
+                        // Function callの処理
+                        return self.handle_function_call(function_call).await;
+                    }
+                }
             }
         }
         Err(anyhow::anyhow!("No response from Gemini"))
@@ -348,52 +367,17 @@ chmod +x script.sh
                 temperature: self.config.temperature.unwrap_or(0.7),
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
             },
+            tools: Some(self.get_function_declarations()),
         };
 
         let response_text = self._send_request_and_parse_response(request).await?;
 
-        let (has_actions, mut context_message) = 
+        // Function Calling移行により、疑似ツール処理は無効化
+        let (_has_actions, _context_message) =
             self.process_response_actions_sync(&response_text, original_message);
-        let mut command_results = Vec::new();
-        if response_text.contains("```execute_command") {
-            match self.process_command_execution_response(&response_text).await {
-                Ok(results) => {
-                    command_results = results;
-                }
-                Err(e) => {
-                    eprintln!("コマンド実行エラー: {}", e);
-                }
-            }
-        }
-        if !command_results.is_empty() {
-            context_message.push_str("コマンド実行結果:\n");
-            for (i, result) in command_results.iter().enumerate() {
-                debug_log!("[Command Result] Command: {}, Success: {}, Exit Code: {:?}, Stdout: {}, Stderr: {}\n",
-                           result.command, result.success, result.exit_code, result.stdout, result.stderr);
-                context_message.push_str(&format!("{}. コマンド: {}\n", i + 1, result.command));
-                context_message.push_str(&format!(
-                    "   ステータス: {}\n",
-                    if result.success { "成功" } else { "失敗" }
-                ));
-                if let Some(code) = result.exit_code {
-                    context_message.push_str(&format!("   終了コード: {}\n", code));
-                }
-                if !result.stdout.is_empty() {
-                    context_message.push_str(&format!("   標準出力:\n{}\n", result.stdout));
-                }
-                if !result.stderr.is_empty() {
-                    context_message.push_str(&format!("   エラー出力:\n{}\n", result.stderr));
-                }
-                context_message.push_str("\n");
-            }
-        }
-
-        if has_actions || !command_results.is_empty() {
-            let result = self.get_ai_response_for_results(&context_message).await?;
-            return Ok(self.format_bold_text(&result));
-        } else {
-            return Ok(self.format_bold_text(&response_text));
-        }
+        
+        // Function Callingで処理されるため、直接レスポンスを返す
+        return Ok(self.format_bold_text(&response_text));
     }
 
     pub async fn chat(&self, message: &str, context: Option<&[ChatMessage]>) -> Result<String> {
@@ -635,6 +619,7 @@ chmod +x script.sh
                 temperature: self.config.temperature.unwrap_or(0.7),
                 max_output_tokens: self.config.max_tokens.unwrap_or(1000),
             },
+            tools: None, // 結果応答時はツールを使用しない
         };
         self.send_and_process_response(request, false).await
     }

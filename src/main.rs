@@ -5,6 +5,7 @@ mod history;
 mod file_access;
 mod markdown;
 mod logger; // Add this line
+mod test_function_calling; // Add test module
 
 use crossterm::{
     event::{self, Event},
@@ -26,6 +27,19 @@ use std::sync::{Arc, Mutex};
 #[tokio::main]
 
 async fn main() -> Result<()> {
+    // プログラム開始時にデバッグログを初期化
+    // プログラム開始時にログファイルをリセット
+    println!("Resetting log files...");
+    if let Err(e) = logger::reset_log_file("contui_debug.log") {
+        eprintln!("Failed to reset contui_debug.log: {}", e);
+    }
+    if let Err(e) = logger::reset_log_file("contui_llm_request.log") {
+        eprintln!("Failed to reset contui_llm_request.log: {}", e);
+    }
+    if let Err(e) = logger::reset_log_file("contui_llm_response.log") {
+        eprintln!("Failed to reset contui_llm_response.log: {}", e);
+    }
+
     // プログラム開始時にデバッグログを初期化
     println!("Initializing debug logger...");
     if let Err(e) = logger::init_logger("contui_debug.log") {
