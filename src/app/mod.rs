@@ -1,3 +1,5 @@
+use crate::gemini::Part; // Add this import
+use crate::gemini::ResponsePart; // Add this import
 use crate::debug_log;
 use ratatui::{
     widgets::ListState,
@@ -7,7 +9,7 @@ use chrono::Utc;
 use tokio::sync::mpsc;
 use crate::gemini::GeminiClient;
 use crate::history::HistoryManager;
-use anyhow::Result;
+// use anyhow::Result; // Unused import
 use unicode_width::UnicodeWidthStr;
 use unicode_segmentation::UnicodeSegmentation;
 use std::sync::{Arc, Mutex};
@@ -50,15 +52,15 @@ impl ChatApp {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         
         // アクティブなセッションを確保
-        let _session_id = history_manager.lock().unwrap().ensure_active_session();
+        let _session_id = (*history_manager.lock().unwrap()).ensure_active_session();
         
         // 現在のセッションからメッセージを読み込み
         let mut messages = Vec::new();
-        if let Some(session) = history_manager.lock().unwrap().get_history().get_current_session() {
+                if let Some(session) = (*history_manager.lock().unwrap()).get_history().get_current_session() {
             for hist_msg in &session.messages {
                 messages.push(crate::history::ChatMessage {
                     id: hist_msg.id,
-                    content: hist_msg.content.clone(),
+                    parts: hist_msg.parts.clone(), // Changed from content
                     is_user: hist_msg.is_user,
                     timestamp: hist_msg.timestamp,
                 });
@@ -111,10 +113,11 @@ impl ChatApp {
         };
 
         // 歓迎メッセージを追加（履歴が空の場合のみ）
+        // 歓迎メッセージを追加（履歴が空の場合のみ）
         if app.messages.is_empty() {
             app.messages.push(crate::history::ChatMessage {
                 id: Uuid::new_v4(),
-                content: "Welcome to ConTUI!".to_string(),
+                parts: vec![crate::gemini::Part::Text { text: "Welcome to ConTUI!".to_string() }], // Changed from content
                 is_user: false,
                 timestamp: Utc::now(),
             });
@@ -125,12 +128,23 @@ impl ChatApp {
 
     pub fn handle_chat_event(&mut self, event: ChatEvent) {
         match event {
-            ChatEvent::AIResponse(msg) => {
-                debug_log!("[handle_chat_event] AIResponse: {}", msg);
-                // ファイル作成要求を処理
-                let processed_msg = self.process_file_creation_requests(&msg);
+            ChatEvent::AIResponse(response_part) => { // Changed msg to response_part and type
+                let response_text = match &response_part {
+                    ResponsePart::Text { text } => text.clone(),
+                    ResponsePart::FunctionCall { function_call } => {
+                        format!("FunctionCall: {}", serde_json::to_string_pretty(&function_call).unwrap_or_default())
+                    },
+                    ResponsePart::FunctionResponse { function_response } => {
+                        format!("FunctionResponse: {}", serde_json::to_string_pretty(&function_response).unwrap_or_default())
+                    },
+                };
+                debug_log!("[handle_chat_event] AIResponse: {}", response_text);
+
+                // ファイル作成要求を処理 (This part needs to be re-evaluated if it's still needed)
+                // For now, let's assume process_file_creation_requests expects a String
+                let processed_msg = self.process_file_creation_requests(&response_text);
                 
-                let final_msg = if processed_msg.is_empty() {
+                let final_msg_content = if processed_msg.is_empty() {
                     "AIからの応答がありませんでした。".to_string()
                 } else {
                     processed_msg
@@ -139,12 +153,12 @@ impl ChatApp {
                 // AIレスポンスをメッセージリストに追加
                 let ai_msg = crate::history::ChatMessage {
                     id: Uuid::new_v4(),
-                    content: final_msg.clone(),
+                    parts: vec![crate::gemini::Part::Text { text: final_msg_content.clone() }], // Changed content to parts
                     is_user: false,
                     timestamp: Utc::now(),
                 };
                 self.messages.push(ai_msg);
-                debug_log!("[handle_chat_event] メッセージ追加: {}", final_msg);
+                debug_log!("[handle_chat_event] メッセージ追加: {}", final_msg_content);
                 self.is_loading = false;
                 
                 // スクロール位置の自動調整
@@ -154,7 +168,7 @@ impl ChatApp {
                 if let Some(next) = self.send_buffer.pop_front() {
                     debug_log!("[handle_chat_event] バッファから自動送信イベント: {}", next);
                     // ChatEvent::AIResponseでバッファ送信要求を通知
-                    let _ = self.event_sender.send(ChatEvent::AIResponse(format!("[BUFFERED_SEND]{}", next)));
+                    let _ = self.event_sender.send(ChatEvent::AIResponse(ResponsePart::Text { text: format!("[BUFFERED_SEND]{}", next) }));
                 }
                 
                 // 履歴管理にAIレスポンスを追加（画面表示と同じ内容を保存）
@@ -163,14 +177,20 @@ impl ChatApp {
                     let mut history_guard = self.history_manager.lock().unwrap();
                     if let Some(session) = history_guard.get_history().get_current_session() {
                         let session_id = session.id;
-                        history_guard.get_history_mut().switch_session(session_id);
+                        let _ = history_guard.get_history_mut().switch_session(session_id);
                     }
-                    history_guard.get_history_mut().add_message(final_msg.clone(), false);
+                    // Add the original ResponsePart to history
+                    let parts_to_add_to_history = match response_part {
+                        ResponsePart::Text { text } => vec![Part::Text { text }],
+                        ResponsePart::FunctionCall { function_call } => vec![Part::Text { text: serde_json::to_string(&function_call).unwrap_or_default() }],
+                        ResponsePart::FunctionResponse { function_response } => vec![Part::Text { text: serde_json::to_string(&function_response).unwrap_or_default() }],
+                    };
+                    let _ = (*history_guard).get_history_mut().add_message(parts_to_add_to_history, false);
                     debug_log!("[handle_chat_event] current_session_id: {:?}", history_guard.get_history().current_session_id);
                 }
 
                 // AIレスポンス追加直後に履歴保存
-                if let Err(e) = self.save_history() {
+                if let Err(e) = (*self.history_manager.lock().unwrap()).save() {
                     debug_log!("[handle_chat_event] save_history error: {:?}", e);
                 }
             }
@@ -195,12 +215,12 @@ impl ChatApp {
 
         // /clearlogコマンド判定
         if original_message.trim() == "/clearlog" {
-            match self.history_manager.lock().unwrap().clear_messages() {
+            match (*self.history_manager.lock().unwrap()).clear_messages() {
                 Ok(_) => {
                     self.messages.clear();
                     self.messages.push(crate::history::ChatMessage {
                         id: Uuid::new_v4(),
-                        content: "✅ ログを全て削除しました.".to_string(),
+                        parts: vec![Part::Text { text: "✅ ログを全て削除しました.".to_string() }], // Changed content to parts
                         is_user: false,
                         timestamp: Utc::now(),
                     });
@@ -208,7 +228,7 @@ impl ChatApp {
                 Err(e) => {
                     self.messages.push(crate::history::ChatMessage {
                         id: Uuid::new_v4(),
-                        content: format!("❌ ログ削除に失敗しました: {}", e),
+                        parts: vec![Part::Text { text: format!("❌ ログ削除に失敗しました: {}", e) }], // Changed content to parts
                         is_user: false,
                         timestamp: Utc::now(),
                     });
@@ -258,20 +278,20 @@ impl ChatApp {
         // ユーザーメッセージを即座に追加（新しいUUIDで）
         let user_msg = crate::history::ChatMessage {
             id: Uuid::new_v4(),
-            content: display_message.clone(),
+            parts: vec![Part::Text { text: display_message.clone() }], // Changed content to parts
             is_user: true,
             timestamp: Utc::now(),
         };
         self.messages.push(user_msg.clone());
-        debug_log!("[send_message] メッセージ追加: {}", user_msg.content);
+        debug_log!("[send_message] メッセージ追加: {}", display_message); // Log the display_message
 
         // 履歴管理にメッセージを追加（表示用と同じ内容）
-        if let Err(_) = self.history_manager.lock().unwrap().get_history_mut().add_message(display_message, true) {
+        if let Err(_) = (*self.history_manager.lock().unwrap()).get_history_mut().add_message(vec![Part::Text { text: display_message.clone() }], true) { // Pass Vec<Part>
             // エラーは無視
         }
         
         // ユーザーメッセージ送信後に履歴保存
-        if let Err(e) = self.save_history() {
+        if let Err(e) = (*self.history_manager.lock().unwrap()).save() {
             debug_log!("[send_message] save_history error: {:?}", e);
         }
 
@@ -311,7 +331,7 @@ impl ChatApp {
         for _ in 0..10 {
             debug_log!("[chat_loop_with_progress_static] step={}", step);
             let progress_msg = format!("🤖 Step {}: LLMに問い合わせ中...", step);
-            let _ = sender.send(ChatEvent::AIResponse(progress_msg));
+            let _ = sender.send(ChatEvent::AIResponse(ResponsePart::Text { text: progress_msg }));
             let prompt = format!(
                 "{}
 
@@ -323,8 +343,8 @@ impl ChatApp {
             debug_log!("[chat_loop_with_progress_static] prompt={}", prompt);
 
             // Get conversation context from history_manager
-            let conversation_context = history_manager.lock().unwrap().get_conversation_context(10); // Use history_manager
-            let response = match tokio::time::timeout(std::time::Duration::from_secs(30), gemini_client.chat(&prompt, Some(&conversation_context))).await {
+            let conversation_context = (*history_manager.lock().unwrap()).get_conversation_context(10); // Use history_manager
+            let response_part = match tokio::time::timeout(std::time::Duration::from_secs(30), gemini_client.chat(&prompt, Some(&conversation_context))).await {
                 Ok(r) => r,
                 Err(_) => {
                     debug_log!("[chat_loop_with_progress_static] LLMリクエストがタイムアウトしました");
@@ -333,31 +353,45 @@ impl ChatApp {
                     return Err(anyhow::anyhow!("LLMリクエストがタイムアウト"));
                 }
             };
-            match response {
-                Ok(response) => {
-                    debug_log!("[chat_loop_with_progress_static] LLM response={}", response);
-                    if response.is_empty() {
+            match response_part {
+                Ok(response_part_content) => {
+                    let response_text = match &response_part_content {
+                        ResponsePart::Text { text } => text.clone(),
+                        ResponsePart::FunctionCall { function_call } => {
+                            format!("FunctionCall: {}", serde_json::to_string_pretty(&function_call).unwrap_or_default())
+                        },
+                        ResponsePart::FunctionResponse { function_response } => {
+                            format!("FunctionResponse: {}", serde_json::to_string_pretty(&function_response).unwrap_or_default())
+                        },
+                    };
+                    debug_log!("[chat_loop_with_progress_static] LLM response={}", response_text);
+                    if response_text.is_empty() {
                         let error_msg = "❌ LLMからの応答が空です。再試行してください。".to_string();
                         let _ = sender.send(ChatEvent::Error(error_msg));
                         return Err(anyhow::anyhow!("LLM応答が空"));
                     }
-                    let response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response);
-                    let _ = sender.send(ChatEvent::AIResponse(response_msg));
+                    let _response_msg = format!("🤖 Step {}: LLM応答\n{}", step, response_text);
+                    let _ = sender.send(ChatEvent::AIResponse(response_part_content.clone())); // Send ResponsePart
 
                     // Add AI's response to history
                     let mut history_guard = history_manager.lock().unwrap();
-                    history_guard.get_history_mut().add_message(response.clone(), false)?;
+                    let parts_to_add_to_history = match response_part_content.clone() {
+                        ResponsePart::Text { text } => vec![Part::Text { text }],
+                        ResponsePart::FunctionCall { function_call } => vec![Part::Text { text: serde_json::to_string(&function_call).unwrap_or_default() }],
+                        ResponsePart::FunctionResponse { function_response } => vec![Part::Text { text: serde_json::to_string(&function_response).unwrap_or_default() }],
+                    };
+                    (*history_guard).get_history_mut().add_message(parts_to_add_to_history, false)?;
 
-                    let lower = response.to_lowercase();
+                    let lower = response_text.to_lowercase();
                     if gemini_client.extract_is_finished_flag(&lower).unwrap_or(false) {
                         // 最終的なAIレスポンスを送信（履歴保存用）
-                        let _ = sender.send(ChatEvent::AIResponse(response.clone()));
+                        let _ = sender.send(ChatEvent::AIResponse(response_part_content.clone())); // Send ResponsePart
                         let finish_msg = "✅ LLMが終了を指示したためループを終了します。".to_string();
-                        let _ = sender.send(ChatEvent::AIResponse(finish_msg));
+                        let _ = sender.send(ChatEvent::AIResponse(ResponsePart::Text { text: finish_msg })); // Send as Text
                         debug_log!("[chat_loop_with_progress_static] finish (done)");
                         return Ok(())
                     }
-                    message = response.clone();
+                    message = response_text; // Use extracted text for next prompt
                     step += 1;
                 }
                 Err(e) => {
@@ -370,18 +404,16 @@ impl ChatApp {
         }
         // 最後のメッセージを最終レスポンスとして送信
         if !message.is_empty() {
-            let _ = sender.send(ChatEvent::AIResponse(message));
+            let _ = sender.send(ChatEvent::AIResponse(ResponsePart::Text { text: message }));
         }
         let finish_msg = "⚠️ LLM応答に「完了」等が含まれなかったため自動終了しました。".to_string();
-        let _ = sender.send(ChatEvent::AIResponse(finish_msg));
+        let _ = sender.send(ChatEvent::AIResponse(ResponsePart::Text { text: finish_msg }));
         debug_log!("[chat_loop_with_progress_static] finish (timeout)");
         Ok(())
     }
 
 
-    pub fn save_history(&mut self) -> Result<()> {
-        self.history_manager.lock().unwrap().save()
-    }
+    
 
     pub fn add_to_input_history(&mut self, message: String) {
         if self.ui.input_history.last().map_or(true, |last| last != &message) {
@@ -500,11 +532,16 @@ impl ChatApp {
     pub fn insert_selected_message(&mut self) {
         if let Some(selected_index) = self.ui.list_state.selected() {
             if let Some(message) = self.messages.get(selected_index) {
-                let content = message.content.clone();
+                let mut content_to_insert = String::new();
+                for part in &message.parts {
+                    if let crate::gemini::Part::Text { text } = part {
+                        content_to_insert.push_str(text);
+                    }
+                }
                 if !self.ui.input.is_empty() {
                     self.ui.input.push('\n');
                 }
-                self.ui.input.push_str(&content);
+                self.ui.input.push_str(&content_to_insert);
                 self.ui.cursor_position = self.ui.input.graphemes(true).count();
                 self.update_input_line_count();
                 self.ui.input_mode = InputMode::Insert;
@@ -513,15 +550,15 @@ impl ChatApp {
     }
 
     pub fn create_new_session(&mut self) {
-        let _session_id = self.history_manager.lock().unwrap().get_history_mut().new_session(None);
+        let _session_id = (*self.history_manager.lock().unwrap()).get_history_mut().new_session(None);
         self.messages.clear();
         self.messages.push(crate::history::ChatMessage {
             id: Uuid::new_v4(),
-            content: "Started new conversation session.".to_string(),
+            parts: vec![Part::Text { text: "Started new conversation session.".to_string() }], // Changed content to parts
             is_user: false,
             timestamp: Utc::now(),
         });
-        if let Err(e) = self.save_history() {
+        if let Err(e) = (*self.history_manager.lock().unwrap()).save() {
             debug_log!("[create_new_session] save_history error: {:?}", e);
         }
     }
@@ -530,7 +567,13 @@ impl ChatApp {
         if !self.messages.is_empty() {
             let total_lines = self.messages.iter().map(|msg| {
                 let prefix = if msg.is_user { "You" } else { "AI" };
-                let content = format!("{}: {}", prefix, msg.content);
+                let mut msg_content_text = String::new();
+                for part in &msg.parts {
+                    if let crate::gemini::Part::Text { text } = part {
+                        msg_content_text.push_str(text);
+                    }
+                }
+                let content = format!("{}: {}", prefix, msg_content_text);
                 crate::markdown::wrap_text(&content, 72).lines().count()
             }).sum::<usize>();
             self.ui.scroll_offset = total_lines.saturating_sub(visible_height);

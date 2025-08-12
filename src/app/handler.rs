@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, KeyEventKind};
 use anyhow::Result;
 
 use crate::app::{ChatApp, InputMode};
-use crate::history::ChatMessage;
+// use crate::history::ChatMessage; // Unused import
 use uuid::Uuid;
 use chrono::Utc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -46,25 +46,6 @@ impl ChatApp {
             // 新しいセッション
             KeyCode::Char('n') => {
                 self.create_new_session();
-            }
-            
-            // 履歴を保存
-            KeyCode::Char('s') => {
-                if let Err(e) = self.save_history() {
-                    self.messages.push(ChatMessage {
-                        id: Uuid::new_v4(),
-                        content: format!("Error saving history: {}", e),
-                        is_user: false,
-                        timestamp: Utc::now(),
-                    });
-                } else {
-                    self.messages.push(ChatMessage {
-                        id: Uuid::new_v4(),
-                        content: "History saved successfully!".to_string(),
-                        is_user: false,
-                        timestamp: Utc::now(),
-                    });
-                }
             }
             
             // インサートモード
@@ -386,4 +367,27 @@ impl ChatApp {
     }
 
     // handle_todo_list_keyは不要になったため削除
+
+    pub async fn save_history(&mut self) -> Result<()> {
+        match self.history_manager.lock().unwrap().save() {
+            Ok(_) => {
+                self.messages.push(crate::history::ChatMessage {
+                    id: Uuid::new_v4(),
+                    parts: vec![crate::gemini::Part::Text { text: "History saved successfully!".to_string() }], // Changed content to parts
+                    is_user: false,
+                    timestamp: Utc::now(),
+                });
+                Ok(())
+            }
+            Err(e) => {
+                self.messages.push(crate::history::ChatMessage {
+                    id: Uuid::new_v4(),
+                    parts: vec![crate::gemini::Part::Text { text: format!("Error saving history: {}", e) }], // Changed content to parts
+                    is_user: false,
+                    timestamp: Utc::now(),
+                });
+                Err(e)
+            }
+        }
+    }
 }

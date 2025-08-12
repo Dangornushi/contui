@@ -1,7 +1,7 @@
 // 状態管理用構造体・enum
 #[derive(Debug)]
 pub enum ChatEvent {
-    AIResponse(String),
+    AIResponse(ResponsePart),
     Error(String),
 }
 
@@ -34,6 +34,7 @@ pub enum InputMode {
     FileBrowser,
     // TodoList, // 削除
 }
+use crate::gemini::ResponsePart; // Add this import
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -62,7 +63,7 @@ impl ChatApp {
     ) {
         self.messages.push(ChatMessage {
             id: Uuid::new_v4(),
-            content: msg,
+            parts: vec![crate::gemini::Part::Text { text: msg }], // Changed content to parts
             is_user: false,
             timestamp: Utc::now(),
         });
@@ -80,7 +81,13 @@ impl ChatApp {
     pub fn auto_scroll_if_at_bottom(&mut self) {
         let total_lines = self.messages.iter().map(|msg| {
             let prefix = if msg.is_user { "You" } else { "AI" };
-            let content = format!("{}: {}", prefix, msg.content);
+            let mut msg_content_text = String::new();
+            for part in &msg.parts {
+                if let crate::gemini::Part::Text { text } = part {
+                    msg_content_text.push_str(text);
+                }
+            }
+            let content = format!("{}: {}", prefix, msg_content_text);
             wrap_text(&content, 72).lines().count()
         }).sum::<usize>();
         
@@ -132,10 +139,22 @@ impl ChatApp {
                 Style::default().fg(Color::Blue)
             };
             let prefix = if msg.is_user { "You" } else { "AI" };
-            let content = format!("{}: {}", prefix, msg.content);
-            let wrapped = wrap_text(&content, max_width);
-            for line in wrapped.lines() {
-                virtual_lines.push((line.to_string(), style));
+            
+            for part in &msg.parts {
+                let content_str = match part {
+                    crate::gemini::Part::Text { text } => text.clone(),
+                    crate::gemini::Part::FunctionCall { function_call } => {
+                        format!("Function Call: {}({})", function_call.name, serde_json::to_string(&function_call.args).unwrap_or_default())
+                    },
+                    crate::gemini::Part::FunctionResponse { function_response } => {
+                        format!("Function Response: {}: {}", function_response.name, serde_json::to_string(&function_response.response).unwrap_or_default())
+                    },
+                };
+                let content = format!("{}: {}", prefix, content_str);
+                let wrapped = wrap_text(&content, max_width);
+                for line in wrapped.lines() {
+                    virtual_lines.push((line.to_string(), style));
+                }
             }
         }
 
@@ -484,14 +503,20 @@ impl ChatApp {
 
         // セッション一覧を表示
         let history_guard = self.history_manager.lock().unwrap();
-        let sessions = history_guard.get_history().get_session_list();
+        let sessions = (*history_guard).get_history().get_session_list();
         let session_items: Vec<ListItem> = sessions
             .iter()
             .map(|session| {
                 let message_count = session.messages.len();
                 let last_message = session.messages.last()
                     .map(|msg| {
-                        let preview = Self::truncate_string_safe(&msg.content, 47);
+                        let mut preview_text = String::new();
+                        for part in &msg.parts {
+                            if let crate::gemini::Part::Text { text } = part {
+                                preview_text.push_str(text);
+                            }
+                        }
+                        let preview = Self::truncate_string_safe(&preview_text, 47);
                         format!(" - {}", preview)
                     })
                     .unwrap_or_else(|| " - No messages".to_string());

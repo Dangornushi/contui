@@ -106,7 +106,7 @@ impl FileAccessManager {
         }
 
         // ユニークなファイル名を生成
-        let unique_path = self.generate_unique_filename(original_path)?;
+        let unique_path = self.generate_unique_filename(original_path, content)?;
         
         // ファイルを作成
         fs::write(&unique_path, content)?;
@@ -114,12 +114,19 @@ impl FileAccessManager {
     }
 
     /// ユニークなファイル名を生成する
-    fn generate_unique_filename<P: AsRef<Path>>(&self, path: P) -> Result<PathBuf> {
+    fn generate_unique_filename<P: AsRef<Path>>(&self, path: P, content: &str) -> Result<PathBuf> {
         let original_path = path.as_ref();
         
         // 元のファイルが存在しない場合はそのまま返す
         if !original_path.exists() {
             return Ok(original_path.to_path_buf());
+        }
+
+        // ファイルが存在し、内容が同じ場合は、そのパスを返す（変更不要）
+        if let Ok(existing_content) = fs::read_to_string(original_path) {
+            if existing_content == content {
+                return Ok(original_path.to_path_buf());
+            }
         }
 
         // ファイル名と拡張子を分離

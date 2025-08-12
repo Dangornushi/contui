@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use crate::config::LlmConfig;
 use crate::file_access::FileAccessManager;
-use crate::history::ChatMessage;
+// use crate::history::ChatMessage; // Unused import
 use std::io::Write;
 use crate::debug_log;
 use crate::history::HistoryManager;
@@ -27,15 +27,18 @@ struct GeminiRequest {
     tools: Option<Vec<Tool>>,
 }
 
-#[derive(Debug, Serialize)]
-struct Content {
-    role: String,
-    parts: Vec<Part>,
+#[derive(Debug, Serialize, Clone)] // Added Clone
+pub struct Content { // Made public
+    pub role: String, // Made public
+    pub parts: Vec<Part>, // Made public
 }
 
-#[derive(Debug, Serialize)]
-struct Part {
-    text: String,
+#[derive(Debug, Serialize, Deserialize, Clone)] // Added Clone
+#[serde(untagged)]
+pub enum Part { // Made public - changed to enum
+    Text { text: String },
+    FunctionCall { #[serde(rename = "functionCall")] function_call: FunctionCall },
+    FunctionResponse { #[serde(rename = "functionResponse")] function_response: FunctionResponse },
 }
 
 #[derive(Debug, Serialize)]
@@ -74,17 +77,24 @@ struct ResponseContent {
     parts: Vec<ResponsePart>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum ResponsePart {
-    Text { text: String },
-    FunctionCall { #[serde(rename = "functionCall")] function_call: FunctionCall },
+#[derive(Debug, Deserialize, Serialize, Clone)] // Added Clone
+pub struct FunctionResponse { // Made public
+    pub name: String, // Made public
+    pub response: serde_json::Value, // Made public
 }
 
-#[derive(Debug, Deserialize)]
-struct FunctionCall {
-    name: String,
-    args: serde_json::Value,
+#[derive(Debug, Deserialize, Clone)] // Added Clone
+#[serde(untagged)]
+pub enum ResponsePart { // Made public
+    Text { text: String },
+    FunctionCall { #[serde(rename = "functionCall")] function_call: FunctionCall },
+    FunctionResponse { #[serde(rename = "functionResponse")] function_response: FunctionResponse },
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)] // Added Serialize and Clone
+pub struct FunctionCall { // Made public
+    pub name: String, // Made public
+    pub args: serde_json::Value, // Made public
 }
 
 #[derive(Clone)]
@@ -115,11 +125,14 @@ impl GeminiClient {
         use tokio::time::{sleep, Duration};
         loop {
             // デバッグ: POST送信直前 (contui_debug.log)
-            debug_log!("[send_google_request_with_retry] POST to: {}\n", url);
-            debug_log!("[send_google_request_with_retry] Request Body: {} \n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
+            debug_log!("[send_google_request_with_retry] POST to: {}
+", url);
+            debug_log!("[send_google_request_with_retry] Request Body: {} 
+", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
             // LLMリクエストJSONをcontui_llm_request.logに出力
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_request.log") {
-                let _ = writeln!(file, "{}\n", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
+                let _ = writeln!(file, "{}
+", serde_json::to_string_pretty(request).unwrap_or_else(|_| "Failed to serialize request".to_string()));
             }
             let resp = self.client
                 .post(url)
@@ -127,25 +140,30 @@ impl GeminiClient {
                 .send()
                 .await;
             // デバッグ: POST送信直後 (contui_debug.log)
-            debug_log!("[send_google_request_with_retry] POST result: {:?}\n", resp.as_ref().map(|r| r.status()));
+            debug_log!("[send_google_request_with_retry] POST result: {:?}
+", resp.as_ref().map(|r| r.status()));
             match resp {
                 Ok(response) => {
                     if response.status().as_u16() == 429 {
                         // 429: 3秒待ってリトライ
-                        debug_log!("[send_google_request_with_retry] 429 received, sleeping 3s\n");
+                        debug_log!("[send_google_request_with_retry] 429 received, sleeping 3s
+");
                         sleep(Duration::from_secs(3)).await;
                         continue;
                     }
                     // デバッグ: response.text().await直前
-                    debug_log!("[send_google_request_with_retry] about to await response.text()\n");
+                    debug_log!("[send_google_request_with_retry] about to await response.text()
+");
                     let text = response.text().await?;
                     // デバッグ: response.text().await直後
-                    debug_log!("[send_google_request_with_retry] response.text() done\n");
+                    debug_log!("[send_google_request_with_retry] response.text() done
+");
                     return Ok(text);
                 }
                 Err(e) => {
                     // 通信エラー時も3秒待ってリトライ
-                    debug_log!("[send_google_request_with_retry] Err (retrying): {}\n", e);
+                    debug_log!("[send_google_request_with_retry] Err (retrying): {}
+", e);
                     sleep(Duration::from_secs(3)).await;
                     continue;
                 }
@@ -230,54 +248,63 @@ impl GeminiClient {
     }
 
     /// Handle function call from Gemini API
-    async fn handle_function_call(&self, function_call: &FunctionCall) -> Result<String> {
-        debug_log!("[handle_function_call] Function: {}, Args: {:?}", function_call.name, function_call.args);
-        
-        match function_call.name.as_str() {
+    async fn handle_function_call(&self, function_call: &FunctionCall) -> Result<ResponsePart> {
+        debug_log!("[handle_function_call] Function: {}, Args: {}", function_call.name, function_call.args);
+
+        let response_value = match function_call.name.as_str() {
             "create_file" => {
                 let filename = function_call.args["filename"].as_str()
                     .ok_or(anyhow::anyhow!("filename parameter is required"))?;
                 let content = function_call.args["content"].as_str()
                     .ok_or(anyhow::anyhow!("content parameter is required"))?;
-                
+
                 match self.create_file_with_unique_name(filename, content) {
-                    Ok(created_path) => Ok(format!("✅ ファイルを作成しました: {}", created_path)),
-                    Err(e) => Ok(format!("❌ ファイル作成に失敗しました: {}", e)),
+                    Ok(created_path) => serde_json::json!({"status": "success", "message": format!("✅ ファイルを作成しました: {}", created_path)}),
+                    Err(e) => serde_json::json!({"status": "error", "message": format!("❌ ファイル作成に失敗しました: {}", e)}),
                 }
             },
             "edit_file" => {
                 let filename = function_call.args["filename"].as_str()
                     .ok_or(anyhow::anyhow!("filename parameter is required"))?;
-                let start_line = function_call.args["start_line"].as_u64()
+                let start_line = function_call.args["start_line"].as_u64() 
                     .ok_or(anyhow::anyhow!("start_line parameter is required"))? as usize;
                 let end_line = function_call.args["end_line"].as_u64()
                     .ok_or(anyhow::anyhow!("end_line parameter is required"))? as usize;
                 let content = function_call.args["content"].as_str()
                     .ok_or(anyhow::anyhow!("content parameter is required"))?;
-                
+
                 match self.file_access.edit_file_range(filename, start_line, end_line, content) {
-                    Ok(_) => Ok(format!("✅ ファイルを編集しました: {}", filename)),
-                    Err(e) => Ok(format!("❌ ファイル編集に失敗しました: {}", e)),
+                    Ok(_) => serde_json::json!({"status": "success", "message": format!("✅ ファイルを編集しました: {}", filename)}),
+                    Err(e) => serde_json::json!({"status": "error", "message": format!("❌ ファイル編集に失敗しました: {}", e)}), 
                 }
             },
             "execute_command" => {
                 let command = function_call.args["command"].as_str()
                     .ok_or(anyhow::anyhow!("command parameter is required"))?;
                 let _silent = function_call.args["silent"].as_bool().unwrap_or(false);
-                
+
                 match self.execute_command(command).await {
                     Ok(result) => {
                         if result.success {
-                            Ok(format!("✅ コマンド実行成功: {}\n出力: {}", command, result.stdout))
+                            serde_json::json!({"status": "success", "message": format!("✅ コマンド実行成功: {}
+出力: {}", command, result.stdout)})
                         } else {
-                            Ok(format!("❌ コマンド実行失敗: {}\nエラー: {}", command, result.stderr))
+                            serde_json::json!({"status": "error", "message": format!("❌ コマンド実行失敗: {}
+エラー: {}", command, result.stderr)})
                         }
                     },
-                    Err(e) => Ok(format!("❌ コマンド実行エラー: {}", e)),
+                    Err(e) => serde_json::json!({"status": "error", "message": format!("❌ コマンド実行エラー: {}", e)}),
                 }
             },
-            _ => Ok(format!("❌ 未知の関数呼び出し: {}", function_call.name)),
-        }
+            _ => serde_json::json!({"status": "error", "message": format!("❌ 未知の関数呼び出し: {}", function_call.name)}),
+        };
+
+        Ok(ResponsePart::FunctionResponse {
+            function_response: FunctionResponse {
+                name: function_call.name.clone(),
+                response: response_value,
+            },
+        })
     }
 
     // システムプロンプトを作成
@@ -300,6 +327,7 @@ impl GeminiClient {
 
     /// レスポンステキストでファイル作成とコマンド実行を処理する共通関数
     /// Function Calling移行により、疑似ツール処理は無効化
+    #[allow(dead_code)]
     fn process_response_actions_sync(
         &self,
         _response_text: &str,
@@ -312,7 +340,7 @@ impl GeminiClient {
     async fn _send_request_and_parse_response(
         &self,
         request: GeminiRequest,
-    ) -> Result<String> {
+    ) -> Result<ResponsePart> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             self.config.model, self.config.gemini_api_key
@@ -321,7 +349,9 @@ impl GeminiClient {
             .send_google_request_with_retry(&url, &request)
             .await?;
         // デバッグ: レスポンス内容をファイルに追記 (contui_debug.log)
-        debug_log!("[_send_request_and_parse_response] response_text:\n{}\n", response_text);
+        debug_log!("[_send_request_and_parse_response] response_text:
+{}
+", response_text);
         // LLMレスポンスJSONをcontui_llm_response.logに出力
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("contui_llm_response.log") {
             let _ = writeln!(file, "{}", response_text);
@@ -334,33 +364,29 @@ impl GeminiClient {
         if let Some(candidate) = gemini_response.candidates.first() {
             if let Some(part) = candidate.content.parts.first() {
                 match part {
-                    ResponsePart::Text { text } => return Ok(text.clone()),
+                    ResponsePart::Text { text } => Ok(ResponsePart::Text { text: text.clone() }),
                     ResponsePart::FunctionCall { function_call } => {
                         // Function callの処理
-                        return self.handle_function_call(function_call).await;
+                        self.handle_function_call(function_call).await
+                    },
+                    ResponsePart::FunctionResponse { function_response } => {
+                        Ok(ResponsePart::FunctionResponse { function_response: function_response.clone() })
                     }
                 }
+            } else {
+                Err(anyhow::anyhow!("No parts in Gemini response"))
             }
+        } else {
+            Err(anyhow::anyhow!("No candidates in Gemini response"))
         }
-        Err(anyhow::anyhow!("No response from Gemini"))
-    }
-
-    async fn send_and_process_response(
-        &self,
-        request: GeminiRequest,
-        _process_actions: bool, // process_actions は現在使用されていないため、_ を付けて警告を抑制
-    ) -> Result<String> {
-        let response_text = self._send_request_and_parse_response(request).await?;
-        // process_actions は現在使用されていないため、常に bold text を返す
-        Ok(self.format_bold_text(&response_text))
     }
 
     // chatとchat_with_file_contextの共通処理をまとめたヘルパー関数
     async fn send_chat_request_and_process_response(
         &self,
         contents: Vec<Content>,
-        original_message: &str,
-    ) -> Result<String> {
+        _original_message: &str,
+    ) -> Result<ResponsePart> {
         let request = GeminiRequest {
             contents,
             generation_config: GenerationConfig {
@@ -370,41 +396,37 @@ impl GeminiClient {
             tools: Some(self.get_function_declarations()),
         };
 
-        let response_text = self._send_request_and_parse_response(request).await?;
+        let response_part = self._send_request_and_parse_response(request).await?;
 
         // Function Calling移行により、疑似ツール処理は無効化
-        let (_has_actions, _context_message) =
-            self.process_response_actions_sync(&response_text, original_message);
+        // let (_has_actions, _context_message) =
+        //     self.process_response_actions_sync(&response_text, original_message);
         
         // Function Callingで処理されるため、直接レスポンスを返す
-        return Ok(self.format_bold_text(&response_text));
+        Ok(response_part)
     }
 
-    pub async fn chat(&self, message: &str, context: Option<&[ChatMessage]>) -> Result<String> {
-        debug_log!("[chat] called with message: {}\n", message);
+    pub async fn chat(&self, message: &str, context: Option<&[Content]>) -> Result<ResponsePart> {
+        debug_log!("[chat] called with message: {}
+", message);
 
         let mut contents: Vec<Content> = Vec::new();
         contents.push(Content {
             role: "user".to_string(),
-            parts: vec![Part {
+            parts: vec![Part::Text {
                 text: self.get_system_prompt(),
             }],
         });
 
         if let Some(ctxs) = context {
-            for msg in ctxs {
-                contents.push(Content {
-                    role: if msg.is_user { "user".to_string() } else { "model".to_string() },
-                    parts: vec![Part {
-                        text: msg.content.clone(),
-                    }],
-                });
+            for msg_content in ctxs {
+                contents.push(msg_content.clone());
             }
         }
 
         contents.push(Content {
             role: "user".to_string(),
-            parts: vec![Part {
+            parts: vec![Part::Text {
                 text: message.to_string(),
             }],
         });
@@ -412,19 +434,28 @@ impl GeminiClient {
         self.send_chat_request_and_process_response(contents, message).await
     }
 
-    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: Option<&[ChatMessage]>) -> Result<String> {
+    pub async fn chat_with_file_context(&self, message: &str, file_paths: &[String], context: Option<&[Content]>) -> Result<ResponsePart> {
         let mut file_contents_text = String::new();
         for file_path in file_paths {
             match self.file_access.read_file(file_path) {
                 Ok(content) => {
-                    file_contents_text.push_str(&format!("\n--- File: {} ---\n", file_path));
+                    file_contents_text.push_str(&format!("
+--- File: {} ---
+", file_path));
                     file_contents_text.push_str(&content);
-                    file_contents_text.push_str("\n--- End of file ---\n\n");
+                    file_contents_text.push_str("
+--- End of file ---
+
+");
                 }
                 Err(e) => {
                     eprintln!("Failed to read file {}: {}", file_path, e);
-                    file_contents_text.push_str(&format!("\n--- Error reading file: {} ---\n", file_path));
-                    file_contents_text.push_str(&format!("Error: {}\n\n", e));
+                    file_contents_text.push_str(&format!("
+--- Error reading file: {} ---
+", file_path));
+                    file_contents_text.push_str(&format!("Error: {}
+
+", e));
                 }
             }
         }
@@ -432,7 +463,7 @@ impl GeminiClient {
         let mut contents: Vec<Content> = Vec::new();
         contents.push(Content {
             role: "user".to_string(),
-            parts: vec![Part {
+            parts: vec![Part::Text {
                 text: self.get_system_prompt(),
             }],
         });
@@ -440,26 +471,25 @@ impl GeminiClient {
         if !file_contents_text.is_empty() {
             contents.push(Content {
                 role: "user".to_string(),
-                parts: vec![Part {
-                    text: format!("=== FILE CONTENTS ===\n{}\n=== END FILE CONTENTS ===\n\n", file_contents_text),
+                parts: vec![Part::Text {
+                    text: format!("=== FILE CONTENTS ===
+{}
+=== END FILE CONTENTS ===
+
+", file_contents_text),
                 }],
             });
         }
 
         if let Some(ctxs) = context {
-            for msg in ctxs {
-                contents.push(Content {
-                    role: if msg.is_user { "user".to_string() } else { "model".to_string() },
-                    parts: vec![Part {
-                        text: msg.content.clone(),
-                    }],
-                });
+            for msg_content in ctxs {
+                contents.push(msg_content.clone());
             }
         }
 
         contents.push(Content {
             role: "user".to_string(),
-            parts: vec![Part {
+            parts: vec![Part::Text {
                 text: message.to_string(),
             }],
         });
@@ -502,7 +532,8 @@ impl GeminiClient {
                 // ``` で終わるまで、または最後の行まで内容を収集
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !content.is_empty() {
-                        content.push_str("\n");
+                        content.push_str("
+");
                     }
                     content.push_str(lines[i]);
                     i += 1;
@@ -571,7 +602,8 @@ impl GeminiClient {
                 // ``` で終わるまで、または最後の行まで内容を収集
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !command.is_empty() {
-                        command.push_str("\n");
+                        command.push_str("
+");
                     }
                     command.push_str(lines[i]);
                     i += 1;
@@ -606,25 +638,8 @@ impl GeminiClient {
         Ok(command_results)
     }
 
-    /// AIに実行結果を送信して、結果に基づく回答を取得
-    async fn get_ai_response_for_results(&self, context_message: &str) -> Result<String> {
-        let request = GeminiRequest {
-            contents: vec![Content {
-                role: "user".to_string(),
-                parts: vec![Part {
-                    text: context_message.to_string(),
-                }],
-            }],
-            generation_config: GenerationConfig {
-                temperature: self.config.temperature.unwrap_or(0.7),
-                max_output_tokens: self.config.max_tokens.unwrap_or(1000),
-            },
-            tools: None, // 結果応答時はツールを使用しない
-        };
-        self.send_and_process_response(request, false).await
-    }
-
     /// **text** 形式を太字に変換するヘルパーメソッド（現在は無効化）
+    #[allow(dead_code)]
     fn format_bold_text(&self, text: &str) -> String {
         // 太字処理は無効化し、元のテキストをそのまま返す
         text.to_string()
@@ -658,7 +673,8 @@ impl GeminiClient {
                 i += 1;
                 while i < lines.len() && !lines[i].starts_with("```") {
                     if !content.is_empty() {
-                        content.push_str("\n");
+                        content.push_str("
+");
                     }
                     content.push_str(lines[i]);
                     i += 1;
@@ -694,22 +710,54 @@ impl GeminiClient {
         loop {
             // 毎回「次に何をすべきか」「追加タスクがあるか」を問うプロンプトを付与
             let prompt = format!(
-                "{}\n\n---\n次に何をすべきか、追加タスクがあるかを必ず明示してください。\nis_finished: true/false のJSONフラグを必ず返してください。",
+                "{}
+
+---
+次に何をすべきか、追加タスクがあるかを必ず明示してください。
+is_finished: true/false のJSONフラグを必ず返してください。",
                 message
             );
             println!("========== LLM Step {} ==========", step);
-            let conversation_context = self.history_manager.lock().unwrap().get_conversation_context(10); // Get last 10 messages
-            let response = self.chat(&prompt, Some(&conversation_context)).await?;
-            println!("LLM Response:\n{}\n", response);
+            let conversation_context = (*self.history_manager.lock().unwrap()).get_conversation_context(10); // Explicit dereference
+            
+            // Call chat and get ResponsePart
+            let response_part = self.chat(&prompt, Some(&conversation_context)).await?;
+
+            let response_text = match &response_part {
+                ResponsePart::Text { text } => text.clone(),
+                ResponsePart::FunctionCall { function_call } => {
+                    // This case should ideally not happen here if handle_function_call is called
+                    // immediately after a FunctionCall is received.
+                    // For now, we'll just represent it as text.
+                    format!("FunctionCall: {}", serde_json::to_string_pretty(&function_call).unwrap_or_default())
+                },
+                ResponsePart::FunctionResponse { function_response } => {
+                    format!("FunctionResponse: {}", serde_json::to_string_pretty(&function_response).unwrap_or_default())
+                },
+            };
+
+            println!("LLM Response:
+{}
+", response_text);
+
+            // Add the response to history
+            // Extract parts from response_part to add to history
+            let parts_to_add_to_history = match response_part {
+                                ResponsePart::Text { text } => vec![Part::Text { text }],
+                ResponsePart::FunctionCall { function_call } => vec![Part::Text { text: serde_json::to_string(&function_call).unwrap_or_default() }],
+                ResponsePart::FunctionResponse { function_response } => vec![Part::Text { text: serde_json::to_string(&function_response).unwrap_or_default() }],
+            };
+
+            (*self.history_manager.lock().unwrap()).get_history_mut().add_message(parts_to_add_to_history, false)?;
 
             // is_finishedフラグで終了判定
-            if self.extract_is_finished_flag(&response) == Some(true) {
+            if self.extract_is_finished_flag(&response_text) == Some(true) {
                 println!("LLMがis_finished: trueを返したためループを終了します。");
                 break;
             }
 
             // 次の入力としてLLMの返答をそのまま使う
-            message = response;
+            message = response_text; // Use the extracted text for the next prompt
             step += 1;
         }
         Ok(())

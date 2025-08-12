@@ -16,10 +16,12 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
 }
 
+use crate::gemini::{Content, Part}; // Moved from impl block
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub id: Uuid,
-    pub content: String,
+    pub parts: Vec<Part>,
     pub is_user: bool,
     pub timestamp: DateTime<Utc>,
 }
@@ -68,21 +70,22 @@ impl ChatHistory {
         id
     }
 
-    pub fn add_message(&mut self, content: String, is_user: bool) -> Result<()> {
+    pub fn add_message(&mut self, parts: Vec<Part>, is_user: bool) -> Result<()> {
         let session_id = self.current_session_id.ok_or_else(|| {
             anyhow::anyhow!("No active session")
         })?;
 
         let message = ChatMessage {
             id: Uuid::new_v4(),
-            content: content.clone(), // Clone content for logging
+            parts: parts.clone(), // Store parts directly
             is_user,
             timestamp: Utc::now(),
         };
 
         if let Some(session) = self.sessions.get_mut(&session_id) {
             let message_type = if is_user { "User" } else { "AI" };
-            debug_log!("[DEBUG] ChatHistory: Added {} message to session {}: {}", message_type, session_id, content);
+            // Adjust debug_log to print a summary of parts or just indicate parts are added
+            debug_log!("[DEBUG] ChatHistory: Added {} message to session {}: Parts added", message_type, session_id);
             session.messages.push(message);
             session.updated_at = Utc::now();
         } else {
@@ -180,11 +183,31 @@ impl HistoryManager {
         self.history.new_session(None)
     }
 
-    pub fn get_conversation_context(&self, max_messages: usize) -> Vec<ChatMessage> {
+    pub fn get_conversation_context(&self, max_messages: usize) -> Vec<Content> {
         if let Some(session) = self.history.get_current_session() {
             let start_index = session.messages.len().saturating_sub(max_messages);
             
-            session.messages[start_index..].to_vec()
+            session.messages[start_index..].iter().map(|msg| {
+                let actual_role = if msg.is_user {
+                    "user".to_string()
+                } else {
+                    let has_function_call = msg.parts.iter().any(|p| matches!(p, crate::gemini::Part::FunctionCall { .. }));
+                    let has_function_response = msg.parts.iter().any(|p| matches!(p, crate::gemini::Part::FunctionResponse { .. }));
+
+                    if has_function_call {
+                        "model".to_string()
+                    } else if has_function_response {
+                        "function".to_string()
+                    } else {
+                        "model".to_string()
+                    }
+                };
+
+                Content {
+                    role: actual_role,
+                    parts: msg.parts.clone(),
+                }
+            }).collect()
         } else {
             Vec::new()
         }
