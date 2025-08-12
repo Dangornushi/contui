@@ -83,18 +83,18 @@ impl ChatApp {
         let history_guard = self.history_manager.lock().unwrap();
         if let Some(session) = history_guard.get_history().get_current_session() {
             for hist_msg in &session.messages {
-                self.messages.push(ChatMessage {
+                self.messages.push(crate::history::ChatMessage {
                     id: hist_msg.id,
-                    content: hist_msg.content.clone(),
+                    parts: hist_msg.parts.clone(), // Changed content to parts
                     is_user: hist_msg.is_user,
-                    timestamp: Utc::now(),
+                    timestamp: hist_msg.timestamp,
                 });
             }
         }
         if self.messages.is_empty() {
             self.messages.push(ChatMessage {
                 id: Uuid::new_v4(),
-                content: "Welcome to ConTUI!".to_string(),
+                parts: vec![crate::gemini::Part::Text { text: "Welcome to ConTUI!".to_string() }],
                 is_user: false,
                 timestamp: Utc::now(),
             });
